@@ -1,30 +1,4 @@
-#!/usr/bin/env python3
-"""
-IAthon – Iteration 6.5 (Robust Context Version)
-Fixes: Windows/OneDrive PermissionError during folder cleanup.
-Features: Enhanced domain discovery and image embedding.
-"""
 
-import argparse
-import os
-import shutil      
-import subprocess
-import re
-import time
-import warnings
-from pathlib import Path
-
-warnings.filterwarnings("ignore")
-
-# --- Core scientific stack ---
-import pandas as pd
-import numpy as np
-from scipy import stats
-
-# --- Plotting (headless-safe) ---
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import seaborn as sns  
 import plotly.express as px
 import plotly.graph_objects as go
@@ -85,7 +59,7 @@ class SafeRunner:
         self.figures_dir = self.output_dir / "figures"
         
         if self.figures_dir.exists():
-            if self.verbose: print(f"🧹 Cleaning old figures (Robust mode)...")
+            if self.verbose: print(f"ðŸ§¹ Cleaning old figures (Robust mode)...")
             robust_rmtree(self.figures_dir)
         
         self.figures_dir.mkdir(parents=True, exist_ok=True)
@@ -120,7 +94,7 @@ class DecisionMaker:
         self.verbose = verbose
     
     def synthesize_report(self, analysis_log, original_prompt, figures_dir, data_preview):
-        if self.verbose: print("✍️ Synthesizing domain-aware report...")
+        if self.verbose: print("âœï¸ Synthesizing domain-aware report...")
         
         figs = sorted(figures_dir.glob("*.png"))
         fig_list = "\n".join([f"- {f.name}" for f in figs])
@@ -222,11 +196,11 @@ class ReActAnalyzer:
         self.observations.append(obs)
 
     def run(self, user_requirements): 
-        print(f"\n🔍 STARTING ANALYSIS (Iteration 6.5)\n{'='*70}")
+        print(f"\nðŸ” STARTING ANALYSIS (Iteration 6.5)\n{'='*70}")
         self.observe()
         
         for step in range(self.max_steps):
-            print(f"\n📍 STEP {step + 1}/{self.max_steps}")
+            print(f"\nðŸ“ STEP {step + 1}/{self.max_steps}")
             decision = self.decider.decide("\n".join(self.observations), step, self.max_steps, self.runner.num_features, self.runner.cat_features, self.data_preview)
             
             if "STOP" in decision.upper(): break
@@ -235,9 +209,9 @@ class ReActAnalyzer:
             
             try:
                 self.runner.run(code)
-                if self.verbose: print("⚡ Success.")
+                if self.verbose: print("âš¡ Success.")
             except Exception as e:
-                print(f"❌ Error: {e}")
+                print(f"âŒ Error: {e}")
             
             self.observe()
             self.analysis_log.append({"step": step + 1, "thought": decision, "result": self.observations[-1]})
@@ -245,7 +219,7 @@ class ReActAnalyzer:
         report_text = self.decider.synthesize_report(self.analysis_log, user_requirements, self.runner.figures_dir, self.data_preview)
         report_path = self.runner.output_dir / "report.md" 
         report_path.write_text(report_text, encoding='utf-8')
-        print(f"✨ Analysis complete. Report saved to {report_path}")
+        print(f"âœ¨ Analysis complete. Report saved to {report_path}")
         return report_path
 
 # ======================================================
@@ -270,11 +244,11 @@ def main():
     decider = DecisionMaker(api_key, verbose=args.verbose)
     coder = CodexGenerator(api_key, verbose=args.verbose)
 
-    analyzer = ReActAnalyzer(runner, decider, coder, max_steps=20, verbose=args.verbose)
+    analyzer = ReActAnalyzer(runner, decider, coder, max_steps=5, verbose=args.verbose)
     report_md_path = analyzer.run("Comprehensive domain-specific report with embedded figures.") 
 
     if args.format:
-        print(f"📦 Converting to {args.format}...")
+        print(f"ðŸ“¦ Converting to {args.format}...")
         out_file = output_path.with_suffix(f".{args.format}")
         subprocess.run(["pandoc", report_md_path.name, "-o", out_file.name], cwd=output_dir)
 
