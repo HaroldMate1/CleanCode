@@ -455,6 +455,249 @@ class SafeRunner:
                 "No figures were generated. Ensure plots are saved to FIGURES_DIR.")
 
 
+
+# ======================================================
+# Data Quality Validator
+# ======================================================
+class DataQualityValidator:
+    def __init__(self, df, num_features, cat_features, verbose=False):
+        self.df = df
+        self.num_features = num_features
+        self.cat_features = cat_features
+        self.verbose = verbose
+        self.issues = []
+        self.corrections = []
+        
+    def validate(self):
+        """Run all validation checks"""
+        print("\n" + "="*80)
+        print("🔍 DATA QUALITY VALIDATION")
+        print("="*80)
+        
+        self._check_synthetic_patterns()
+        self._check_outliers()
+        self._check_domain_constraints()
+        self._check_temporal_logic()
+        
+        return self._generate_report()
+    
+    def _check_synthetic_patterns(self):
+        """Detect artificially generated data"""
+        print("\n📊 Checking for synthetic data patterns...")
+        
+        for col in self.num_features:
+            data = self.df[col].dropna()
+            if len(data) < 30:
+                continue
+            
+            # Test 1: Too-perfect uniform distribution
+            _, p_uniform = stats.kstest(data, 'uniform', 
+                                       args=(data.min(), data.max() - data.min()))
+            if p_uniform > 0.95:
+                self.issues.append({
+                    'type': 'SYNTHETIC_UNIFORM',
+                    'column': col,
+                    'severity': 'WARNING',
+                    'message': f'{col} follows suspiciously perfect uniform distribution (p={p_uniform:.4f})',
+                    'recommendation': 'Verify data source - may be artificially generated'
+                })
+            
+            # Test 2: Too-perfect normal distribution
+            _, p_normal = stats.normaltest(data)
+            if p_normal > 0.99:
+                self.issues.append({
+                    'type': 'SYNTHETIC_NORMAL',
+                    'column': col,
+                    'severity': 'WARNING',
+                    'message': f'{col} follows suspiciously perfect normal distribution (p={p_normal:.4f})',
+                    'recommendation': 'Real-world data rarely this normal - verify authenticity'
+                })
+            
+            # Test 3: Repeated patterns (too many duplicates)
+            value_counts = data.value_counts()
+            if len(value_counts) < len(data) * 0.1 and len(data) > 100:
+                self.issues.append({
+                    'type': 'EXCESSIVE_DUPLICATES',
+                    'column': col,
+                    'severity': 'WARNING',
+                    'message': f'{col} has only {len(value_counts)} unique values from {len(data)} records',
+                    'recommendation': 'Verify if data was artificially constrained'
+                })
+            
+            # Test 4: Too many round numbers
+            if data.dtype in [np.float64, np.float32]:
+                round_nums = (data == data.round(0)).sum()
+                if round_nums / len(data) > 0.9 and len(data) > 50:
+                    self.issues.append({
+                        'type': 'EXCESSIVE_ROUNDING',
+                        'column': col,
+                        'severity': 'INFO',
+                        'message': f'{col} has {round_nums/len(data)*100:.1f}% round numbers',
+                        'recommendation': 'Natural measurements usually have decimal precision'
+                    })
+    
+    def _check_outliers(self):
+        """Detect statistical outliers"""
+        print("📈 Checking for outliers...")
+        
+        for col in self.num_features:
+            data = self.df[col].dropna()
+            if len(data) < 10:
+                continue
+            
+            # IQR method
+            Q1 = data.quantile(0.25)
+            Q3 = data.quantile(0.75)
+            IQR = Q3 - Q1
+            lower_bound = Q1 - 3 * IQR
+            upper_bound = Q3 + 3 * IQR
+            
+            outliers = data[(data < lower_bound) | (data > upper_bound)]
+            
+            if len(outliers) > 0:
+                self.issues.append({
+                    'type': 'OUTLIERS',
+                    'column': col,
+                    'severity': 'INFO',
+                    'message': f'{col} has {len(outliers)} extreme outliers',
+                    'details': f'Range: [{data.min():.2f}, {data.max():.2f}], Expected: [{lower_bound:.2f}, {upper_bound:.2f}]',
+                    'recommendation': 'Review extreme values - may indicate data entry errors'
+                })
+    
+    def _check_domain_constraints(self):
+        """Check domain-specific logical constraints"""
+        print("🎯 Checking domain constraints...")
+        
+        # Age checks
+        age_cols = [c for c in self.num_features if 'age' in c.lower()]
+        for col in age_cols:
+            invalid_ages = self.df[(self.df[col] < 0) | (self.df[col] > 120)]
+            if len(invalid_ages) > 0:
+                self.issues.append({
+                    'type': 'INVALID_AGE',
+                    'column': col,
+                    'severity': 'ERROR',
+                    'message': f'{col} has {len(invalid_ages)} invalid ages (< 0 or > 120)',
+                    'details': f'Invalid values: {invalid_ages[col].tolist()[:5]}',
+                    'recommendation': 'CRITICAL: Fix or remove invalid ages'
+                })
+        
+        # Percentage checks
+        pct_cols = [c for c in self.num_features if any(x in c.lower() for x in ['percent', 'pct', 'rate'])]
+        for col in pct_cols:
+            invalid_pct = self.df[(self.df[col] < 0) | (self.df[col] > 100)]
+            if len(invalid_pct) > 0:
+                self.issues.append({
+                    'type': 'INVALID_PERCENTAGE',
+                    'column': col,
+                    'severity': 'ERROR',
+                    'message': f'{col} has {len(invalid_pct)} values outside 0-100%',
+                    'recommendation': 'Fix percentage values'
+                })
+        
+        # Time/duration checks (negative times)
+        time_cols = [c for c in self.num_features if any(x in c.lower() for x in ['time', 'duration', 'seconds', 'minutes', 'hours'])]
+        for col in time_cols:
+            negative_times = self.df[self.df[col] < 0]
+            if len(negative_times) > 0:
+                self.issues.append({
+                    'type': 'NEGATIVE_TIME',
+                    'column': col,
+                    'severity': 'ERROR',
+                    'message': f'{col} has {len(negative_times)} negative time values',
+                    'details': f'Examples: {negative_times[col].tolist()[:5]}',
+                    'recommendation': 'CRITICAL: Times cannot be negative'
+                })
+    
+    def _check_temporal_logic(self):
+        """Check temporal relationships"""
+        print("⏰ Checking temporal logic...")
+        
+        # Check for date columns
+        date_cols = self.df.select_dtypes(include=['datetime64']).columns.tolist()
+        date_cols += [c for c in self.df.columns if any(x in c.lower() for x in ['date', 'year', 'born', 'death'])]
+        
+        # Birth/death logic
+        if 'birth' in str(date_cols).lower() and 'death' in str(date_cols).lower():
+            birth_col = [c for c in date_cols if 'birth' in c.lower()][0]
+            death_col = [c for c in date_cols if 'death' in c.lower()][0]
+            
+            invalid = self.df[self.df[death_col] < self.df[birth_col]]
+            if len(invalid) > 0:
+                self.issues.append({
+                    'type': 'TEMPORAL_PARADOX',
+                    'column': f'{birth_col}, {death_col}',
+                    'severity': 'ERROR',
+                    'message': f'{len(invalid)} records have death before birth',
+                    'recommendation': 'CRITICAL: Fix temporal logic errors'
+                })
+    
+    def _generate_report(self):
+        """Generate validation report"""
+        print("\n" + "="*80)
+        print("📋 VALIDATION SUMMARY")
+        print("="*80)
+        
+        if not self.issues:
+            print("✅ No major data quality issues detected")
+            return True
+        
+        # Group by severity
+        errors = [i for i in self.issues if i['severity'] == 'ERROR']
+        warnings = [i for i in self.issues if i['severity'] == 'WARNING']
+        info = [i for i in self.issues if i['severity'] == 'INFO']
+        
+        if errors:
+            print(f"\n❌ {len(errors)} CRITICAL ERRORS:")
+            for issue in errors:
+                print(f"   • {issue['column']}: {issue['message']}")
+                print(f"     → {issue['recommendation']}")
+        
+        if warnings:
+            print(f"\n⚠️  {len(warnings)} WARNINGS:")
+            for issue in warnings:
+                print(f"   • {issue['column']}: {issue['message']}")
+                print(f"     → {issue['recommendation']}")
+        
+        if info:
+            print(f"\nℹ️  {len(info)} INFORMATIONAL:")
+            for issue in info:
+                print(f"   • {issue['column']}: {issue['message']}")
+        
+        print("="*80)
+        return len(errors) == 0
+    
+    def auto_fix(self):
+        """Attempt automatic fixes for common issues"""
+        print("\n🔧 ATTEMPTING AUTO-FIXES...")
+        
+        df_fixed = self.df.copy()
+        
+        for issue in self.issues:
+            if issue['type'] == 'NEGATIVE_TIME' and issue['severity'] == 'ERROR':
+                col = issue['column']
+                # Fix: Take absolute value
+                before_count = (df_fixed[col] < 0).sum()
+                df_fixed[col] = df_fixed[col].abs()
+                self.corrections.append(f"Fixed {before_count} negative times in '{col}' (took absolute value)")
+                print(f"   ✅ Fixed {before_count} negative values in '{col}'")
+            
+            elif issue['type'] == 'INVALID_AGE':
+                col = issue['column']
+                # Fix: Cap at reasonable range
+                before_count = ((df_fixed[col] < 0) | (df_fixed[col] > 120)).sum()
+                df_fixed[col] = df_fixed[col].clip(0, 120)
+                self.corrections.append(f"Capped {before_count} invalid ages in '{col}' to 0-120 range")
+                print(f"   ✅ Capped {before_count} invalid ages in '{col}'")
+        
+        if self.corrections:
+            print(f"\n✅ Applied {len(self.corrections)} automatic fixes")
+            return df_fixed
+        else:
+            print("   No auto-fixes applied")
+            return df_fixed
+
+
 # ======================================================
 # Decision Maker
 # ======================================================
@@ -467,54 +710,94 @@ class DecisionMaker:
         self.model = "gpt-5-mini"
     
     def decide(self, observations: str, step_num: int, max_steps: int, 
-               num_features: list, cat_features: list, data_preview: str) -> str:
+            num_features: list, cat_features: list, data_preview: str) -> str:
         
         context = ""
         if self.custom_prompt:
             context = f"USER CONTEXT: {self.custom_prompt}\n\n"
-       
+    
+        # First step: Generate comprehensive batch plan
+        if step_num == 0:
+            prompt = f"""{context}DATA PREVIEW:
+    {data_preview}
 
-        prompt = f"""{context}DATA PREVIEW:
-{data_preview}
+    NUMERIC: {num_features}
+    CATEGORICAL: {cat_features}
 
-NUMERIC: {num_features}
-CATEGORICAL: {cat_features}
+    STEP {step_num + 1}/{max_steps} - INITIAL BATCH ANALYSIS PLAN
 
-STEP {step_num + 1}/{max_steps}
-OBSERVATIONS: {observations}
+    You must create a COMPREHENSIVE BATCH ANALYSIS that generates ALL core visualizations in ONE execution.
 
-STRATEGY - Create diverse, comprehensive analysis:
-1. Distribution plots (histograms, KDE)
-2. Correlation heatmaps
-3. Scatter plots for relationships
-4. Box plots for group comparisons
-5. Statistical tests (t-tests, ANOVA, chi-square, correlations)
-6. Time series if applicable
-7. Outlier detection
-8. MANDATORY: Kaplan-Meier Survival Analysis and Log-rank tests IF variables like 'death', 'status', or 'time' are detected in the preview.
-9. Log-rank or Cox regression tests to compare survival between groups
+    MANDATORY BATCH REQUIREMENTS:
+    1. Generate 5-7 DIFFERENT visualization types in a SINGLE code block
+    2. Include ALL of the following categories:
+    - Distribution analysis (histograms, KDE plots)
+    - Correlation heatmap
+    - Relationship plots (scatter, pair plots)
+    - Group comparisons (box plots, violin plots)
+    - Statistical summaries (bar charts with error bars)
+    
+    3. SURVIVAL ANALYSIS (if applicable):
+    - Check for variables like 'death', 'status', 'time', 'event', 'survival'
+    - If found, include Kaplan-Meier curves and log-rank tests
+    
+    4. ALL plots must save to unique filenames in FIGURES_DIR
+    5. Each plot must use plt.close() after plt.savefig()
 
-GOALS:
-- Generate 8-10 different visualizations
-- Perform 3+ statistical tests  
-- Use varied plot types
-- Focus on most interesting patterns
+    OUTPUT FORMAT:
+    Your response should describe a BATCH of 5-7 analyses to be coded together:
+    "BATCH ANALYSIS: Create comprehensive visualization suite including:
+    1. Distribution plots for [specific variables]
+    2. Correlation heatmap for [specific numeric features]
+    3. Scatter plot showing [specific relationship]
+    4. Box plots comparing [specific groups]
+    5. [Additional specific analyses]
+    ... (continue to 5-7 total)"
 
-Choose ONE specific next action. Be concrete about variables.
-If {step_num + 1} >= 15, respond "STOP"."""
-        
+    Be SPECIFIC about which variables to analyze. This is a BATCH request - all will execute together."""
+
+        # Follow-up steps: Target specific gaps or refinements
+        else:
+            prompt = f"""{context}DATA PREVIEW:
+    {data_preview}
+
+    NUMERIC: {num_features}
+    CATEGORICAL: {cat_features}
+
+    STEP {step_num + 1}/{max_steps}
+    CURRENT OBSERVATIONS: {observations}
+
+    STRATEGY - Fill gaps or add specialized analysis:
+
+    Already completed: {observations}
+
+    Now create a TARGETED BATCH for remaining analyses:
+    - Advanced statistical tests (t-tests, ANOVA, chi-square with effect sizes)
+    - Time series analysis (if temporal data exists)
+    - Outlier detection and visualization
+    - Subgroup analyses
+    - Feature interactions
+    - Additional domain-specific plots
+
+    If most core analyses are complete ({step_num + 1} >= 3), you may:
+    - Respond "STOP" if analysis is comprehensive
+    - Request ONE specific refinement or deep-dive analysis
+
+    OUTPUT:
+    Either "STOP" or "BATCH ANALYSIS: [describe 2-4 specific analyses to generate together]"
+
+    Be concrete about variables and analysis types."""
+
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
-            # temperature=0.4,
         )
         
         if hasattr(response, 'usage'):
             self.tracker.record(self.model, response.usage)
         
         return response.choices[0].message.content.strip()
-    
-
+        
 
 
     def synthesize_report(self, analysis_log, original_prompt, figures_dir, data_preview):
@@ -615,55 +898,65 @@ class CodexGenerator:
         self.verbose = verbose
         self.model = "gpt-5.1-codex-mini"
 
-    def generate(self, instruction, num_features, cat_features, data_preview, error_context = None) -> str:
+    def generate(self, instruction, num_features, cat_features, data_preview, error_context=None) -> str:
+        """Enhanced code generation optimized for batch analysis requests"""
         error_block = ""
         if error_context:
             error_block = f"""
-        PREVIOUS EXECUTION ERROR (FIX THIS):
-        {error_context}
+    PREVIOUS EXECUTION ERROR (FIX THIS):
+    {error_context}
 
-        RULE:
-        - Do NOT repeat the same mistake
-        - Ensure all variables are defined before use
-        """
-        prompt = f"""You are an expert data scientist. Generate Python code.
+    RULES:
+    - Do NOT repeat the same mistake
+    - Ensure all variables are defined before use
+    """
 
-                DATA:
-                {data_preview}
+        prompt = f"""You are an expert data scientist. Generate Python code for BATCH ANALYSIS.
 
-                NUMERIC: {num_features}
-                CATEGORICAL: {cat_features}
+    DATA:
+    {data_preview}
 
-                {error_block}
+    NUMERIC: {num_features}
+    CATEGORICAL: {cat_features}
 
-                TASK: {instruction}
+    {error_block}
 
-                CRITICAL RULES:
-                1. DataFrame 'df' is ALREADY LOADED - NEVER use pd.read_csv/excel
-                2. Variables: df, num_features, cat_features, plt, sns, px, go, stats, np, pd, FIGURES_DIR
-                3. Save plots: os.path.join(FIGURES_DIR, 'name.png')
-                4. ALWAYS plt.close() after plt.savefig()
-                5. Every code block MUST BE SELF-CONTAINED. 
-                6. If you need a filtered dataframe (like df_clean), you MUST define it 
-                inside the current code block using 'df'.
-                7. Do not assume variables from previous steps exist.
+    BATCH TASK: {instruction}
 
-                ERROR PREVENTION:
-                - Check dtypes: df[col].dtype
-                - Convert times: pd.to_timedelta(df[col]).dt.total_seconds()
-                - Ensure numeric: df[col] = pd.to_numeric(df[col], errors='coerce')
-                - Handle NaN: df.dropna(subset=[col])
-                - Use pd.isna() not .isnull() on scalars
-                - Check column exists: if col in df.columns
+    CRITICAL BATCH RULES:
+    1. DataFrame 'df' is ALREADY LOADED - NEVER use pd.read_csv/excel
+    2. Generate ALL requested analyses in ONE code block
+    3. Each visualization must have a UNIQUE filename
+    4. Save plots: plt.savefig(os.path.join(FIGURES_DIR, 'descriptive_name_001.png'), dpi=150, bbox_inches='tight')
+    5. ALWAYS plt.close() after EVERY plt.savefig()
+    6. Sequential numbering: plot_001.png, plot_002.png, etc.
+    7. Self-contained: Define ALL intermediate variables (like df_clean) within this block
 
-                QUALITY:
-                - Descriptive titles, labels, legends
-                - Appropriate plot types
-                - Good font sizes, DPI=150
-                - Statistical tests with p-values
-                - Print results
+    BATCH EFFICIENCY:
+    - Process multiple plots in sequence
+    - Reuse cleaned data (define once, use multiple times)
+    - Clear matplotlib state between plots with plt.close()
+    - Use descriptive filenames: 'distribution_age.png', 'correlation_heatmap.png', 'survival_kaplan_meier.png'
 
-                OUTPUT: Pure Python only. NO markdown, NO backticks."""
+    ERROR PREVENTION:
+    - Check dtypes before operations: df[col].dtype
+    - Convert times: pd.to_timedelta(df[col]).dt.total_seconds()
+    - Ensure numeric: df[col] = pd.to_numeric(df[col], errors='coerce')
+    - Handle NaN: df.dropna(subset=[col])
+    - Check column exists: if col in df.columns
+    - For survival analysis: validate status column is binary/boolean
+
+    QUALITY STANDARDS:
+    - Descriptive titles for each plot
+    - Clear axis labels with units
+    - Legends where appropriate
+    - Font sizes readable (12-14pt)
+    - DPI=150 minimum
+    - Statistical annotations (p-values, correlations, means)
+    - Print statistical results to console
+
+    OUTPUT: Pure Python code only. NO markdown, NO backticks, NO explanations."""
+
         response = self.client.responses.create(
             model=self.model,
             input=prompt,)
@@ -673,6 +966,9 @@ class CodexGenerator:
             self.tracker.record(self.model, response.usage)
         
         return response.output_text.strip()
+
+
+
 
 # ======================================================
 # ReAct Orchestrator
@@ -826,10 +1122,37 @@ def main():
 
     df, num_features, cat_features = load_and_clean(input_path)
     runner = SafeRunner(df, num_features, cat_features, output_dir, verbose=args.verbose)
+    
+    
+    df, num_features, cat_features = load_and_clean(input_path)
+
+    # Data Quality Validation
+    validator = DataQualityValidator(df, num_features, cat_features, verbose=args.verbose)
+    validation_passed = validator.validate()
+
+    # Offer auto-fix for errors
+    if not validation_passed:
+        print("\n⚠️  Data quality issues detected!")
+        response = input("Attempt automatic fixes? (y/n): ").strip().lower()
+        if response == 'y':
+            df = validator.auto_fix()
+            print("✅ Using corrected dataset")
+        else:
+            print("⚠️  Proceeding with original data (issues may affect analysis)")
+
+    runner = SafeRunner(df, num_features, cat_features, output_dir, verbose=args.verbose)
+    
+    
+    
+    
+    
+    
+    
+    
     decider = DecisionMaker(api_key, tracker, custom_prompt=custom_prompt, verbose=args.verbose)
     coder = CodexGenerator(api_key, tracker, verbose=args.verbose)
 
-    analyzer = ReActAnalyzer(runner, decider, coder, tracker, max_steps=15, verbose=args.verbose)
+    analyzer = ReActAnalyzer(runner, decider, coder, tracker, max_steps=5, verbose=args.verbose)
     
     # Use custom prompt if provided, otherwise use default
     if custom_prompt:
