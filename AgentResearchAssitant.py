@@ -196,6 +196,59 @@ class SafeCodeRunner:
             if self.verbose: print(f"DEBUG Error: {str(e)}")
             return {'success': False, 'error': str(e)}
 
+class CodexAnalyzer:
+    def __init__(self, api_key=None, model="gpt-5.1-codex-max", verbose=False):
+        self.client = OpenAI(api_key=api_key)
+        self.model = model
+        self.verbose = verbose
+
+    def generate_code(self, task, runner):
+        num_cols = runner.persistent_vars.get("num_features", [])
+        cat_cols = runner.persistent_vars.get("cat_features", [])
+
+        prompt = f"""
+                You are an expert data scientist.
+
+                AVAILABLE OBJECTS:
+                - df: pandas DataFrame
+                - num_features: {num_cols}
+                - cat_features: {cat_cols}
+                - FIGURES_DIR: valid directory path (string)
+
+                LIBRARIES:
+                - pandas as pd
+                - numpy as np
+                - plotly.express as px
+                - plotly.graph_objects as go
+                - seaborn as sns
+                - matplotlib.pyplot as plt
+                - scipy.stats as stats
+
+                STRICT RULES:
+                - OUTPUT PYTHON CODE ONLY
+                - NO markdown, NO backticks
+                - NO explanations
+                - NEVER call fig.show() or plt.show()
+                - ALWAYS save figures to FIGURES_DIR
+                - Use high DPI (>=300) for matplotlib
+                - Prefer Plotly when possible
+                - Use statistically appropriate tests
+
+                TASK:
+                {task}
+                """
+        response = self.client.responses.create(
+            model=self.model,
+            input=prompt
+        )
+
+        code = response.output_text.strip()
+
+        if self.verbose:
+            print("🧠 Codex code preview:\n", code[:500])
+
+        return code
+
 class AgenticAnalyzer:
     def __init__(self, api_key=None, model='gpt-5.1', verbose=False):
         self.api_key = api_key or os.getenv('OPENAI_API_KEY')
@@ -298,6 +351,14 @@ class ReportWriter:
     def write_conclusion(self, findings):
         return self._call(f"Summarize key takeaways: {findings}")
 
+def generate_caption_from_filename(filename):
+    name = filename.stem.replace("_", " ")
+    return (
+        f"{name.capitalize()}. "
+        "Visualization generated automatically during exploratory analysis. "
+        "See main text for statistical interpretation."
+    )
+
 class AgenticReportGenerator:
     def __init__(self, data_path, output_path, api_key=None, verbose=False):
         self.data_path = Path(data_path)
@@ -311,7 +372,7 @@ class AgenticReportGenerator:
 
     def generate_report(self, user_prompt):
         print("🤖 Analyzing data (Heads-down mode)...")
-        analysis_log = self.analyzer.analyze_with_code_execution(self.runner, initial_user_prompt=user_prompt)
+        analysis_log = self.run_coding_phase()
         print("🎨 Enhancing visualizations...")
         self._enhance_visualizations(analysis_log)
         print("✍️ Writing final report...")
@@ -349,7 +410,11 @@ class AgenticReportGenerator:
 
     def _format_visualizations(self):
         figs = sorted((self.output_dir / 'figures').glob('*.png'))
-        return "\n".join([f"![Figure {i}](figures/{f.name})" for i, f in enumerate(figs, 1)])
+        md = []
+        for i, f in enumerate(figs, 1):
+            caption = generate_caption_from_filename(f)
+            md.append(f"![Figure {i}. {caption}](figures/{f.name})")
+        return "\n\n".join(md)
 
     def convert_to_format(self, fmt):
         out = self.output_path.with_suffix(f'.{fmt}')
@@ -358,6 +423,36 @@ class AgenticReportGenerator:
             subprocess.run(['pandoc', str(self.output_path), '-o', str(out)], check=True)
             print(f"✅ Saved: {out}")
         except Exception as e: print(f"❌ Error: {e}")
+    
+    def run_coding_phase(self):
+        print("🧪 Running statistical analysis & figures (Codex)...")
+
+        codex = CodexAnalyzer(
+            api_key=self.analyzer.api_key,
+            verbose=self.verbose
+        )
+
+        tasks = [
+            "Perform exploratory data analysis on numeric variables. "
+            "Generate at least 3 insightful visualizations.",
+
+            "Test for correlations between numeric variables. "
+            "Use Pearson or Spearman appropriately and report p-values.",
+
+            "Compare distributions across categorical variables "
+            "using appropriate statistical tests.",
+
+            "Create one summary visualization combining multiple variables."
+        ]
+
+        execution_log = []
+
+        for task in tasks:
+            code = codex.generate_code(task, self.runner)
+            result = self.runner.execute_code(code, description=task)
+            execution_log.append(result)
+
+        return execution_log
 
 def main():
     parser = argparse.ArgumentParser()
