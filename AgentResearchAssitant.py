@@ -61,6 +61,39 @@ class TokenUsage:
 class UsageTracker:
     """Central tracker for all API usage"""
     models: Dict[str, TokenUsage] = field(default_factory=dict)
+    pricing_cache: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    
+    def fetch_pricing(self):
+        """Fetch current pricing from OpenAI (with fallback to hardcoded values)"""
+        # Fallback pricing (updated from your link - Jan 2025)
+        fallback_pricing = {
+            "gpt-4o": {"input": 2.50 / 1_000_000, "output": 10.00 / 1_000_000},  # per token
+            "gpt-4o-mini": {"input": 0.150 / 1_000_000, "output": 0.600 / 1_000_000},
+            "o1": {"input": 15.00 / 1_000_000, "output": 60.00 / 1_000_000},
+            "o1-mini": {"input": 3.00 / 1_000_000, "output": 12.00 / 1_000_000},
+            "gpt-4-turbo": {"input": 10.00 / 1_000_000, "output": 30.00 / 1_000_000},
+            "gpt-4": {"input": 30.00 / 1_000_000, "output": 60.00 / 1_000_000},
+            "gpt-3.5-turbo": {"input": 0.50 / 1_000_000, "output": 1.50 / 1_000_000},
+        }
+        
+        # Try to map model names to pricing (handle version suffixes)
+        self.pricing_cache = {}
+        for model_name in self.models.keys():
+            # Extract base model name (e.g., "gpt-4o" from "gpt-4o-2024-11-20")
+            base_model = None
+            for known_model in fallback_pricing.keys():
+                if model_name.startswith(known_model):
+                    base_model = known_model
+                    break
+            
+            if base_model:
+                self.pricing_cache[model_name] = fallback_pricing[base_model]
+            else:
+                # Unknown model - use conservative estimate
+                print(f"⚠️  Unknown pricing for model '{model_name}', using GPT-4 rates as estimate")
+                self.pricing_cache[model_name] = fallback_pricing["gpt-4"]
+        
+        return self.pricing_cache
     
     def record(self, model: str, usage):
         """Record usage from OpenAI response - handles multiple API formats"""
@@ -107,11 +140,8 @@ class UsageTracker:
         print("📊 TOKEN USAGE SUMMARY")
         print("="*70)
         
-        # Approximate pricing (as of early 2025, adjust as needed)
-        pricing = {
-            "gpt-5.1": {"input": 0.01, "output": 0.03},  # per 1K tokens
-            "gpt-5.1-codex-max": {"input": 0.01, "output": 0.03},
-        }
+        # Fetch current pricing
+        pricing = self.fetch_pricing()
         
         total_cost = 0.0
         
@@ -121,16 +151,22 @@ class UsageTracker:
             print(f"   Completion tokens: {usage.completion_tokens:,}")
             print(f"   Total tokens:      {usage.total_tokens:,}")
             
-            # Cost estimation
+            # Cost calculation
             if model in pricing:
-                input_cost = (usage.prompt_tokens / 1000) * pricing[model]["input"]
-                output_cost = (usage.completion_tokens / 1000) * pricing[model]["output"]
+                input_cost = usage.prompt_tokens * pricing[model]["input"]
+                output_cost = usage.completion_tokens * pricing[model]["output"]
                 model_cost = input_cost + output_cost
                 total_cost += model_cost
-                print(f"   Estimated cost:    ${model_cost:.4f}")
+                
+                print(f"   Input cost:        ${input_cost:.6f}")
+                print(f"   Output cost:       ${output_cost:.6f}")
+                print(f"   Total cost:        ${model_cost:.6f}")
+            else:
+                print(f"   Cost:              Unknown pricing for this model")
         
         print(f"\n{'='*70}")
-        print(f"💰 TOTAL ESTIMATED COST: ${total_cost:.4f}")
+        print(f"💰 TOTAL ESTIMATED COST: ${total_cost:.6f}")
+        print(f"   (Based on OpenAI pricing as of Jan 2025)")
         print("="*70)
         
         return total_cost
@@ -139,15 +175,33 @@ class UsageTracker:
         """Save detailed log to file"""
         log_path = output_dir / "token_usage.log"
         
+        pricing = self.pricing_cache if self.pricing_cache else self.fetch_pricing()
+        
         with open(log_path, 'w') as f:
             f.write("TOKEN USAGE LOG\n")
             f.write("="*70 + "\n\n")
             
+            total_cost = 0.0
             for model, usage in self.models.items():
                 f.write(f"Model: {model}\n")
                 f.write(f"  Prompt tokens:     {usage.prompt_tokens:,}\n")
                 f.write(f"  Completion tokens: {usage.completion_tokens:,}\n")
-                f.write(f"  Total tokens:      {usage.total_tokens:,}\n\n")
+                f.write(f"  Total tokens:      {usage.total_tokens:,}\n")
+                
+                if model in pricing:
+                    input_cost = usage.prompt_tokens * pricing[model]["input"]
+                    output_cost = usage.completion_tokens * pricing[model]["output"]
+                    model_cost = input_cost + output_cost
+                    total_cost += model_cost
+                    
+                    f.write(f"  Input cost:        ${input_cost:.6f}\n")
+                    f.write(f"  Output cost:       ${output_cost:.6f}\n")
+                    f.write(f"  Total cost:        ${model_cost:.6f}\n")
+                
+                f.write("\n")
+            
+            f.write(f"{'='*70}\n")
+            f.write(f"TOTAL COST: ${total_cost:.6f}\n")
         
         print(f"📝 Token usage log saved to: {log_path}")
 
