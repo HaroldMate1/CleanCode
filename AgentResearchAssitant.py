@@ -57,56 +57,204 @@ class TokenUsage:
         self.completion_tokens += completion
         self.total_tokens += (prompt + completion)
 
+import json
+import re
+import requests
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Optional
+from dataclasses import dataclass, field
+from bs4 import BeautifulSoup
+
+# ======================================================
+# FALLBACK PRICING (if web fetch fails)
+# ======================================================
+FALLBACK_PRICING = {
+    "gpt-4o": {"input": 2.50, "output": 10.00},
+    "gpt-4o-mini": {"input": 0.150, "output": 0.600},
+    "o1": {"input": 15.00, "output": 60.00},
+    "o1-mini": {"input": 3.00, "output": 12.00},
+    "o3-mini": {"input": 1.10, "output": 4.40},
+    "gpt-4-turbo": {"input": 10.00, "output": 30.00},
+    "gpt-4": {"input": 30.00, "output": 60.00},
+    "gpt-3.5-turbo": {"input": 0.50, "output": 1.50},
+    "dall-e-3": {"standard_1024": 0.040, "standard_1792": 0.080, "hd_1024": 0.080, "hd_1792": 0.120},
+    "dall-e-2": {"1024": 0.020, "512": 0.018, "256": 0.016},
+}
+
+@dataclass
+class TokenUsage:
+    """Track token usage per model"""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    
+    def add(self, prompt: int, completion: int):
+        self.prompt_tokens += prompt
+        self.completion_tokens += completion
+        self.total_tokens += (prompt + completion)
+
 @dataclass
 class UsageTracker:
-    """Central tracker for all API usage"""
+    """
+    Central tracker for all API usage with live pricing fetch
+    """
     models: Dict[str, TokenUsage] = field(default_factory=dict)
     pricing_cache: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    pricing_source: str = "unknown"
+    cache_file: Path = field(default_factory=lambda: Path.home() / ".cache" / "iathlon" / "openai_pricing.json")
+    
+    def __post_init__(self):
+        # Ensure cache directory exists
+        self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Try to fetch live pricing on initialization
+        self.fetch_pricing()
+    
+    def _fetch_live_pricing_from_web(self) -> Optional[Dict]:
+        """
+        Attempt to fetch pricing from OpenAI's website
+        Returns dict of pricing or None if failed
+        """
+        print("🌐 Attempting to fetch live pricing from OpenAI...")
+        
+        urls_to_try = [
+            "https://openai.com/api/pricing/",
+            "https://platform.openai.com/docs/pricing",
+            "https://openai.com/pricing",
+        ]
+        
+        for url in urls_to_try:
+            try:
+                response = requests.get(
+                    url,
+                    timeout=10,
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                )
+                
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    text = soup.get_text()
+                    
+                    # Extract pricing using regex patterns
+                    extracted = {}
+                    
+                    # Pattern for model pricing: model name followed by prices
+                    patterns = [
+                        r'(gpt-[\w.-]+).*?\$\s*([\d.]+)\s*(?:/|per)\s*(?:1M|million).*?input.*?\$\s*([\d.]+)\s*(?:/|per)\s*(?:1M|million).*?output',
+                        r'(o\d+(?:-[\w]+)?).*?\$\s*([\d.]+)\s*(?:/|per)\s*(?:1M|million).*?input.*?\$\s*([\d.]+)\s*(?:/|per)\s*(?:1M|million).*?output',
+                    ]
+                    
+                    for pattern in patterns:
+                        for match in re.finditer(pattern, text, re.IGNORECASE | re.DOTALL):
+                            model = match.group(1).strip()
+                            input_price = float(match.group(2))
+                            output_price = float(match.group(3))
+                            extracted[model] = {"input": input_price, "output": output_price}
+                    
+                    if extracted:
+                        print(f"✅ Successfully fetched pricing for {len(extracted)} models from {url}")
+                        
+                        # Save to cache
+                        try:
+                            cache_data = {
+                                'timestamp': datetime.now().isoformat(),
+                                'source': url,
+                                'pricing': extracted
+                            }
+                            with open(self.cache_file, 'w') as f:
+                                json.dump(cache_data, f, indent=2)
+                            print(f"💾 Saved live pricing to cache: {self.cache_file}")
+                        except Exception as e:
+                            print(f"⚠️  Failed to save cache: {e}")
+                        
+                        return extracted
+            
+            except Exception as e:
+                continue
+        
+        print("⚠️  Failed to fetch live pricing from all URLs")
+        return None
+    
+    def _load_from_cache(self) -> Optional[Dict]:
+        """Load pricing from cache file"""
+        try:
+            if self.cache_file.exists():
+                with open(self.cache_file, 'r') as f:
+                    cache_data = json.load(f)
+                
+                timestamp = cache_data.get('timestamp', 'unknown')
+                pricing = cache_data.get('pricing', {})
+                
+                if pricing:
+                    print(f"💾 Loaded cached pricing from {timestamp}")
+                    return pricing
+        except Exception as e:
+            print(f"⚠️  Failed to load cache: {e}")
+        
+        return None
     
     def fetch_pricing(self):
-        """Fetch current pricing from OpenAI (with fallback to hardcoded values)"""
-        # Fallback pricing (updated from your link - Jan 2025)
-        fallback_pricing = {
-            "gpt-4o": {"input": 2.50 / 1_000_000, "output": 10.00 / 1_000_000},  # per token
-            "gpt-4o-mini": {"input": 0.150 / 1_000_000, "output": 0.600 / 1_000_000},
-            "o1": {"input": 15.00 / 1_000_000, "output": 60.00 / 1_000_000},
-            "o1-mini": {"input": 3.00 / 1_000_000, "output": 12.00 / 1_000_000},
-            "gpt-4-turbo": {"input": 10.00 / 1_000_000, "output": 30.00 / 1_000_000},
-            "gpt-4": {"input": 30.00 / 1_000_000, "output": 60.00 / 1_000_000},
-            "gpt-3.5-turbo": {"input": 0.50 / 1_000_000, "output": 1.50 / 1_000_000},
-            "dall-e-3": {"standard_1024": 0.040, "standard_1792": 0.080, "hd_1024": 0.080, "hd_1792": 0.120},  # per image
-            "dall-e-2": {"1024": 0.020, "512": 0.018, "256": 0.016},  # per image
-        }
+        """
+        Fetch current pricing with fallback chain:
+        1. Try live web fetch
+        2. Try cached pricing
+        3. Use hardcoded fallback
+        """
+        # Try live fetch first
+        live_pricing = self._fetch_live_pricing_from_web()
         
-        # Try to map model names to pricing (handle version suffixes)
-        self.pricing_cache = {}
-        for model_name in self.models.keys():
-            # Extract base model name (e.g., "gpt-4o" from "gpt-4o-2024-11-20")
-            base_model = None
-            for known_model in fallback_pricing.keys():
-                if model_name.startswith(known_model):
-                    base_model = known_model
-                    break
-            
-            if base_model:
-                self.pricing_cache[model_name] = fallback_pricing[base_model]
-            else:
-                # Unknown model - use conservative estimate
-                print(f"⚠️  Unknown pricing for model '{model_name}', using GPT-4 rates as estimate")
-                self.pricing_cache[model_name] = fallback_pricing["gpt-4"]
+        if live_pricing:
+            self.pricing_cache = live_pricing
+            self.pricing_source = "live"
+            return self.pricing_cache
+        
+        # Try cache
+        cached_pricing = self._load_from_cache()
+        if cached_pricing:
+            self.pricing_cache = cached_pricing
+            self.pricing_source = "cache"
+            return self.pricing_cache
+        
+        # Use fallback
+        print("📋 Using hardcoded fallback pricing (January 2025)")
+        self.pricing_cache = FALLBACK_PRICING.copy()
+        self.pricing_source = "fallback"
         
         return self.pricing_cache
     
+    def _get_model_pricing(self, model_name: str) -> Dict[str, float]:
+        """Get pricing for a specific model with intelligent matching"""
+        # Try exact match
+        if model_name in self.pricing_cache:
+            return self.pricing_cache[model_name]
+        
+        # Try pattern matching (e.g., gpt-4o-2024-11-20 matches gpt-4o)
+        for known_model, pricing in self.pricing_cache.items():
+            if model_name.startswith(known_model):
+                return pricing
+        
+        # Infer from model name
+        model_lower = model_name.lower()
+        if 'gpt-5' in model_lower or 'o4' in model_lower:
+            return {"input": 15.00, "output": 60.00}
+        elif 'gpt-4' in model_lower or 'o1' in model_lower:
+            return {"input": 30.00, "output": 60.00}
+        elif 'mini' in model_lower or 'gpt-3.5' in model_lower:
+            return {"input": 0.50, "output": 1.50}
+        else:
+            print(f"⚠️  Unknown model '{model_name}', using conservative estimate")
+            return {"input": 30.00, "output": 60.00}
+    
     def record(self, model: str, usage):
-        """Record usage from OpenAI response - handles multiple API formats"""
+        """Record usage from OpenAI response"""
         if model not in self.models:
             self.models[model] = TokenUsage()
         
-        # Try different attribute names for different API endpoints
         prompt = 0
         completion = 0
         
-        # Try to get tokens using various possible attribute names
+        # Try different attribute names
         for prompt_attr in ['prompt_tokens', 'input_tokens', 'total_input_tokens']:
             if hasattr(usage, prompt_attr):
                 prompt = getattr(usage, prompt_attr)
@@ -117,7 +265,7 @@ class UsageTracker:
                 completion = getattr(usage, completion_attr)
                 break
         
-        # Fallback: check if it's a dict-like object
+        # Fallback to dict
         if prompt == 0 and completion == 0:
             try:
                 if hasattr(usage, '__dict__'):
@@ -127,12 +275,10 @@ class UsageTracker:
                 else:
                     usage_dict = dict(usage)
                 
-                prompt = usage_dict.get('prompt_tokens') or usage_dict.get('input_tokens') or 0
-                completion = usage_dict.get('completion_tokens') or usage_dict.get('output_tokens') or 0
+                prompt = usage_dict.get('prompt_tokens', 0) or usage_dict.get('input_tokens', 0)
+                completion = usage_dict.get('completion_tokens', 0) or usage_dict.get('output_tokens', 0)
             except:
-                print(f"⚠️  Warning: Could not extract token usage from response")
-                print(f"   Usage object type: {type(usage)}")
-                print(f"   Available attributes: {dir(usage)}")
+                print(f"⚠️  Warning: Could not extract token usage")
         
         self.models[model].add(prompt, completion)
     
@@ -141,78 +287,78 @@ class UsageTracker:
         if model not in self.models:
             self.models[model] = TokenUsage()
         
-        # Image generation doesn't use tokens in the traditional sense
-        # We'll store the count in a special way
-        self.models[model].add(num_images, 0)  # Store image count as "prompt tokens"
+        self.models[model].add(num_images, 0)
         
-        # Store size and quality for cost calculation
         if not hasattr(self.models[model], 'image_specs'):
             self.models[model].image_specs = []
         self.models[model].image_specs.append({'size': size, 'quality': quality})
     
     def print_summary(self):
         """Print detailed usage summary with cost estimates"""
-        print("\n" + "="*70)
-        print("📊 TOKEN USAGE SUMMARY")
-        print("="*70)
+        print("\n" + "="*80)
+        print("💰 TOKEN USAGE & COST SUMMARY")
+        print("="*80)
         
-        # Fetch current pricing
-        pricing = self.fetch_pricing()
+        # Show pricing source
+        source_indicators = {
+            'live': '✅ Live from OpenAI',
+            'cache': '💾 Cached from previous fetch',
+            'fallback': '📋 Hardcoded fallback (Jan 2025)'
+        }
+        print(f"📊 Pricing Source: {source_indicators.get(self.pricing_source, 'Unknown')}")
+        print(f"📅 Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("="*80)
         
         total_cost = 0.0
         
         for model, usage in self.models.items():
             print(f"\n🤖 Model: {model}")
             
-            # Check if this is an image model
-            if 'dall-e' in model.lower() or 'image' in model.lower():
-                num_images = usage.prompt_tokens  # We stored image count here
+            # Check if image model
+            if 'dall-e' in model.lower():
+                num_images = usage.prompt_tokens
                 print(f"   Images generated:  {num_images}")
                 
-                if hasattr(usage, 'image_specs') and model in pricing:
+                if hasattr(usage, 'image_specs'):
                     model_cost = 0
+                    pricing = self._get_model_pricing(model)
+                    
                     for spec in usage.image_specs:
                         size = spec['size']
                         quality = spec['quality']
                         
-                        # Calculate cost based on size and quality
                         if 'dall-e-3' in model.lower():
-                            if quality == 'hd':
-                                cost_per_image = pricing[model].get(f"hd_{size.split('x')[0]}", 0.080)
-                            else:
-                                cost_per_image = pricing[model].get(f"standard_{size.split('x')[0]}", 0.040)
-                        else:  # DALL-E 2
-                            cost_per_image = pricing[model].get(size.split('x')[0], 0.020)
+                            key = f"{'hd' if quality == 'hd' else 'standard'}_{size.split('x')[0]}"
+                            cost_per_image = pricing.get(key, 0.040)
+                        else:
+                            cost_per_image = pricing.get(size.split('x')[0], 0.020)
                         
                         model_cost += cost_per_image
-                        print(f"   Size: {size}, Quality: {quality}")
-                        print(f"   Cost per image:    ${cost_per_image:.4f}")
+                        print(f"   Size: {size}, Quality: {quality}, Cost: ${cost_per_image:.4f}")
                     
                     total_cost += model_cost
                     print(f"   Total cost:        ${model_cost:.6f}")
             else:
                 # Regular token-based model
-                print(f"   Prompt tokens:     {usage.prompt_tokens:,}")
-                print(f"   Completion tokens: {usage.completion_tokens:,}")
-                print(f"   Total tokens:      {usage.total_tokens:,}")
+                print(f"   Input tokens:      {usage.prompt_tokens:>12,}")
+                print(f"   Output tokens:     {usage.completion_tokens:>12,}")
+                print(f"   Total tokens:      {usage.total_tokens:>12,}")
                 
-                # Cost calculation
-                if model in pricing:
-                    input_cost = usage.prompt_tokens * pricing[model]["input"]
-                    output_cost = usage.completion_tokens * pricing[model]["output"]
-                    model_cost = input_cost + output_cost
-                    total_cost += model_cost
-                    
-                    print(f"   Input cost:        ${input_cost:.6f}")
-                    print(f"   Output cost:       ${output_cost:.6f}")
-                    print(f"   Total cost:        ${model_cost:.6f}")
-                else:
-                    print(f"   Cost:              Unknown pricing for this model")
+                pricing = self._get_model_pricing(model)
+                input_cost = (usage.prompt_tokens / 1_000_000) * pricing["input"]
+                output_cost = (usage.completion_tokens / 1_000_000) * pricing["output"]
+                model_cost = input_cost + output_cost
+                total_cost += model_cost
+                
+                print(f"   ─────────────────────────────────")
+                print(f"   Input cost:        ${input_cost:>12.6f}")
+                print(f"   Output cost:       ${output_cost:>12.6f}")
+                print(f"   Model total:       ${model_cost:>12.6f}")
+                print(f"   Rate: ${pricing['input']:.2f}/${pricing['output']:.2f} per 1M tokens")
         
-        print(f"\n{'='*70}")
-        print(f"💰 TOTAL ESTIMATED COST: ${total_cost:.6f}")
-        print(f"   (Based on OpenAI pricing as of Jan 2025)")
-        print("="*70)
+        print(f"\n{'='*80}")
+        print(f"💵 TOTAL ESTIMATED COST: ${total_cost:.6f}")
+        print("="*80)
         
         return total_cost
     
@@ -220,61 +366,62 @@ class UsageTracker:
         """Save detailed log to file"""
         log_path = output_dir / "token_usage.log"
         
-        pricing = self.pricing_cache if self.pricing_cache else self.fetch_pricing()
-        
         with open(log_path, 'w') as f:
-            f.write("TOKEN USAGE LOG\n")
-            f.write("="*70 + "\n\n")
+            f.write("="*80 + "\n")
+            f.write("TOKEN USAGE & COST LOG\n")
+            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Pricing Source: {self.pricing_source}\n")
+            f.write("="*80 + "\n\n")
             
             total_cost = 0.0
+            
             for model, usage in self.models.items():
                 f.write(f"Model: {model}\n")
                 
-                if 'dall-e' in model.lower() or 'image' in model.lower():
+                if 'dall-e' in model.lower():
                     num_images = usage.prompt_tokens
-                    f.write(f"  Images generated:  {num_images}\n")
+                    f.write(f"  Images: {num_images}\n")
                     
-                    if hasattr(usage, 'image_specs') and model in pricing:
+                    if hasattr(usage, 'image_specs'):
                         model_cost = 0
+                        pricing = self._get_model_pricing(model)
+                        
                         for spec in usage.image_specs:
                             size = spec['size']
                             quality = spec['quality']
                             
                             if 'dall-e-3' in model.lower():
-                                if quality == 'hd':
-                                    cost_per_image = pricing[model].get(f"hd_{size.split('x')[0]}", 0.080)
-                                else:
-                                    cost_per_image = pricing[model].get(f"standard_{size.split('x')[0]}", 0.040)
+                                key = f"{'hd' if quality == 'hd' else 'standard'}_{size.split('x')[0]}"
+                                cost = pricing.get(key, 0.040)
                             else:
-                                cost_per_image = pricing[model].get(size.split('x')[0], 0.020)
+                                cost = pricing.get(size.split('x')[0], 0.020)
                             
-                            model_cost += cost_per_image
-                            f.write(f"  Size: {size}, Quality: {quality}\n")
-                            f.write(f"  Cost per image:    ${cost_per_image:.4f}\n")
+                            model_cost += cost
+                            f.write(f"  {size} {quality}: ${cost:.4f}\n")
                         
                         total_cost += model_cost
-                        f.write(f"  Total cost:        ${model_cost:.6f}\n")
+                        f.write(f"  Total: ${model_cost:.6f}\n")
                 else:
-                    f.write(f"  Prompt tokens:     {usage.prompt_tokens:,}\n")
-                    f.write(f"  Completion tokens: {usage.completion_tokens:,}\n")
-                    f.write(f"  Total tokens:      {usage.total_tokens:,}\n")
+                    f.write(f"  Input tokens:  {usage.prompt_tokens:,}\n")
+                    f.write(f"  Output tokens: {usage.completion_tokens:,}\n")
+                    f.write(f"  Total tokens:  {usage.total_tokens:,}\n")
                     
-                    if model in pricing:
-                        input_cost = usage.prompt_tokens * pricing[model]["input"]
-                        output_cost = usage.completion_tokens * pricing[model]["output"]
-                        model_cost = input_cost + output_cost
-                        total_cost += model_cost
-                        
-                        f.write(f"  Input cost:        ${input_cost:.6f}\n")
-                        f.write(f"  Output cost:       ${output_cost:.6f}\n")
-                        f.write(f"  Total cost:        ${model_cost:.6f}\n")
+                    pricing = self._get_model_pricing(model)
+                    input_cost = (usage.prompt_tokens / 1_000_000) * pricing["input"]
+                    output_cost = (usage.completion_tokens / 1_000_000) * pricing["output"]
+                    model_cost = input_cost + output_cost
+                    total_cost += model_cost
+                    
+                    f.write(f"  Input cost:  ${input_cost:.6f}\n")
+                    f.write(f"  Output cost: ${output_cost:.6f}\n")
+                    f.write(f"  Total cost:  ${model_cost:.6f}\n")
                 
                 f.write("\n")
             
-            f.write(f"{'='*70}\n")
+            f.write("="*80 + "\n")
             f.write(f"TOTAL COST: ${total_cost:.6f}\n")
         
-        print(f"📝 Token usage log saved to: {log_path}")
+        print(f"📄 Token usage log saved to: {log_path}")
 
 # ======================================================
 # Utilities
@@ -376,8 +523,9 @@ def load_and_clean(path: Path):
     return df, num_features, cat_features
 
 # ======================================================
-# 2. SAFE EXECUTION ENVIRONMENT
+# 2. SAFE EXECUTION ENVIRONMENT (FIXED)
 # ======================================================
+# Also update CodexGenerator.generate() prompt below
 class SafeRunner:
     def __init__(self, df, num_features, cat_features, output_dir: Path, verbose=False):
         self.df = df
@@ -401,10 +549,36 @@ class SafeRunner:
             else:
                 code = "\n".join([line for line in code.split("\n") if "```" not in line])
 
+        # SECURITY CHECK: Block file reading operations - data is already in memory
+        forbidden_patterns = [
+            (r'pd\.read_csv\s*\(', "pd.read_csv() - data is already loaded in 'df' variable"),
+            (r'pd\.read_excel\s*\(', "pd.read_excel() - data is already loaded in 'df' variable"),
+            (r'pd\.read_json\s*\(', "pd.read_json() - data is already loaded in 'df' variable"),
+            (r'pd\.read_table\s*\(', "pd.read_table() - data is already loaded in 'df' variable"),
+            (r'pd\.read_sql\s*\(', "pd.read_sql() - data is already loaded in 'df' variable"),
+        ]
+        
+        for pattern, description in forbidden_patterns:
+            if re.search(pattern, code, re.IGNORECASE):
+                raise RuntimeError(
+                    f"❌ Code attempted to use {description}. "
+                    f"The DataFrame is already available as 'df'. "
+                    f"Please use the existing 'df' variable instead of reading files."
+                )
+
         globals_safe = {
-            "df": self.df, "num_features": self.num_features, "cat_features": self.cat_features, 
-            "plt": plt, "sns": sns, "px": px, "go": go, "stats": stats, "np": np, "pd": pd,
-            "FIGURES_DIR": str(self.figures_dir) 
+            "df": self.df, 
+            "num_features": self.num_features, 
+            "cat_features": self.cat_features, 
+            "plt": plt, 
+            "sns": sns, 
+            "px": px, 
+            "go": go, 
+            "stats": stats, 
+            "np": np, 
+            "pd": pd,
+            "FIGURES_DIR": str(self.figures_dir),
+            "os": os  # Allow os module for path operations
         }
         
         old_cwd = os.getcwd()
@@ -414,15 +588,17 @@ class SafeRunner:
         finally:
             os.chdir(old_cwd)
 
+
 # ======================================================
 # 3. DECISION MAKER (CHAT MODEL)
 # ======================================================
 class DecisionMaker:
-    def __init__(self, api_key, tracker: UsageTracker, verbose=False):
+    def __init__(self, api_key, tracker: UsageTracker, custom_prompt=None, verbose=False):
         self.client = OpenAI(api_key=api_key)
         self.tracker = tracker
+        self.custom_prompt = custom_prompt
         self.verbose = verbose
-        self.model = "gpt-5.1"
+        self.model = "gpt-5-mini"
     
     def synthesize_report(self, analysis_log, original_prompt, figures_dir, data_preview):
         if self.verbose: print("✍️ Synthesizing domain-aware report...")
@@ -430,8 +606,29 @@ class DecisionMaker:
         figs = sorted(figures_dir.glob("*.png"))
         fig_list = "\n".join([f"- {f.name}" for f in figs])
 
+        # Build context-aware prompt
+        context_section = ""
+        style_section = "STYLE: High-impact scientific paper."
+        
+        if self.custom_prompt:
+            context_section = f"""
+USER CONTEXT AND REQUIREMENTS:
+{self.custom_prompt}
+
+IMPORTANT: Adapt the report to match the user's specified context, tone, length, and focus areas.
+"""
+            # Extract style hints if provided
+            if any(word in self.custom_prompt.lower() for word in ['concise', 'brief', 'short', 'executive']):
+                style_section = "STYLE: Concise executive summary format (3-5 pages max)."
+            elif any(word in self.custom_prompt.lower() for word in ['detailed', 'comprehensive', 'thorough', 'in-depth']):
+                style_section = "STYLE: Comprehensive technical report with detailed analysis."
+            elif any(word in self.custom_prompt.lower() for word in ['casual', 'informal', 'accessible']):
+                style_section = "STYLE: Accessible, conversational tone for general audience."
+
         synthesis_prompt = f"""
         You are a world-class Data Scientist and Technical Writer.
+        
+        {context_section}
         
         DATA PREVIEW (Use this to discover the context):
         {data_preview}
@@ -443,17 +640,18 @@ class DecisionMaker:
         {fig_list}
 
         YOUR TASK:
-        1. CONTEXT IDENTIFICATION: Based on the preview, what is this data? (e.g., Ironman Race results).
-        2. DOMAIN VOCABULARY: Use the correct terminology. For races, use 'splits', 'pacing', 'transitions (T1/T2)', and 'overall time'. 
+        1. CONTEXT IDENTIFICATION: Based on the preview and user requirements, understand the data domain.
+        2. DOMAIN VOCABULARY: Use correct terminology appropriate to the field.
         3. REPORT STRUCTURE: Intro, Detailed Results (with images), Statistical Discussion, and Conclusion.
         4. IMAGE EMBEDDING: Place ![Description](figures/filename.png) immediately after the text that discusses it.
+        5. USER REQUIREMENTS: Follow any specific instructions about length, tone, focus areas, or audience.
         
-        STYLE: High-impact scientific paper.
+        {style_section}
         """
         response = self.client.chat.completions.create(
             model=self.model, 
             messages=[{"role": "user", "content": synthesis_prompt}],
-            temperature=0.7 
+            #temperature=0.7 
         )
         
         # Track usage
@@ -469,8 +667,20 @@ class DecisionMaker:
         figs = sorted(figures_dir.glob("*.png"))
         fig_list = "\n".join([f"- {f.name}" for f in figs])
 
+        # Adapt presentation to user context
+        context_section = ""
+        if self.custom_prompt:
+            context_section = f"""
+USER CONTEXT:
+{self.custom_prompt}
+
+Adapt the presentation style and content to match the user's requirements.
+"""
+
         pptx_prompt = f"""
         You are creating a professional PowerPoint presentation for executives.
+        
+        {context_section}
         
         DATA PREVIEW:
         {data_preview}
@@ -557,7 +767,7 @@ class DecisionMaker:
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": pptx_prompt}],
-            temperature=0.6
+            #temperature=0.6
         )
         
         # Track usage
@@ -580,6 +790,10 @@ class DecisionMaker:
     def generate_title_image(self, domain_context: str, output_path: Path):
         """Generate a title slide image using DALL-E"""
         if self.verbose: print(f"🎨 Generating title image: {domain_context}")
+        
+        # Enhance with custom context if available
+        if self.custom_prompt:
+            domain_context = f"{domain_context}. Context: {self.custom_prompt[:100]}"
         
         # Create a refined prompt for DALL-E
         image_prompt = f"""
@@ -618,7 +832,19 @@ class DecisionMaker:
     def decide(self, observations: str, step_num: int, max_steps: int, 
            num_features: list, cat_features: list, data_preview: str) -> str:
         
+        # Adapt analysis approach based on custom prompt
+        context_section = ""
+        if self.custom_prompt:
+            context_section = f"""
+USER PROVIDED CONTEXT:
+{self.custom_prompt}
+
+Use this information to guide your analysis focus and methodology.
+"""
+        
         prompt = f"""Analyze the DATA PREVIEW below to identify the domain.
+                
+                {context_section}
                 
                 DATA PREVIEW:
                 {data_preview}
@@ -627,16 +853,17 @@ class DecisionMaker:
                 CURRENT OBSERVATIONS: {observations}
 
                 MISSION: 
-                - Deduce the origin/subject of the data.
+                - Deduce the origin/subject of the data (consider user context if provided).
                 - Propose a specific visualization or statistical test.
                 - If columns represent times (Split/Swim/Bike), suggest converting them to seconds.
+                - Align analysis with user requirements and priorities.
                 
                 DECISION (ONE ACTION):"""
         
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
+            #temperature=0.3,
         )
         
         # Track usage
@@ -653,7 +880,7 @@ class CodexGenerator:
         self.client = OpenAI(api_key=api_key)
         self.tracker = tracker
         self.verbose = verbose
-        self.model = "gpt-5.1-codex-max"
+        self.model = "gpt-5.1-codex-mini"
 
     def generate(self, instruction, num_features, cat_features, data_preview) -> str:
         prompt = f"""
@@ -794,12 +1021,24 @@ class ReActAnalyzer:
 # 6. CLI
 # ======================================================
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-i", "--input", required=True)
-    parser.add_argument("-o", "--output", required=True)
-    parser.add_argument("-f", "--format", choices=["pdf", "docx", "pptx"])
-    parser.add_argument("--api-key", required=False)
-    parser.add_argument("-v", "--verbose", action="store_true")
+    parser = argparse.ArgumentParser(
+        description="IAthon - Intelligent Automated Data Analysis with customizable reports"
+    )
+    parser.add_argument("-i", "--input", required=True, help="Input data file (CSV or Excel)")
+    parser.add_argument("-o", "--output", required=True, help="Output file path")
+    parser.add_argument("-f", "--format", choices=["pdf", "docx", "pptx"], help="Output format")
+    parser.add_argument("--api-key", required=False, help="OpenAI API key (or set OPENAI_API_KEY env var)")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    parser.add_argument(
+        "-p", "--prompt", 
+        required=False, 
+        help="Custom prompt describing data context and report requirements (e.g., 'This is triathlon race data. Create a concise executive summary with focus on performance trends.')"
+    )
+    parser.add_argument(
+        "--prompt-file",
+        required=False,
+        help="Path to text file containing custom prompt"
+    )
     args = parser.parse_args()
 
     api_key = get_api_key(args.api_key)
@@ -807,16 +1046,36 @@ def main():
     output_path = Path(args.output)
     output_dir = output_path.parent
 
+    # Load custom prompt if provided
+    custom_prompt = None
+    if args.prompt_file:
+        prompt_file = Path(args.prompt_file)
+        if prompt_file.exists():
+            custom_prompt = prompt_file.read_text(encoding='utf-8')
+            print(f"📝 Loaded custom prompt from: {prompt_file}")
+        else:
+            print(f"⚠️  Prompt file not found: {prompt_file}")
+    elif args.prompt:
+        custom_prompt = args.prompt
+        print(f"📝 Using custom prompt: {custom_prompt[:100]}...")
+
     # Initialize usage tracker
     tracker = UsageTracker()
 
     df, num_features, cat_features = load_and_clean(input_path)
     runner = SafeRunner(df, num_features, cat_features, output_dir, verbose=args.verbose)
-    decider = DecisionMaker(api_key, tracker, verbose=args.verbose)
+    decider = DecisionMaker(api_key, tracker, custom_prompt=custom_prompt, verbose=args.verbose)
     coder = CodexGenerator(api_key, tracker, verbose=args.verbose)
 
-    analyzer = ReActAnalyzer(runner, decider, coder, tracker, max_steps=15, verbose=args.verbose)
-    report_md_path, report_text = analyzer.run("Comprehensive domain-specific report with embedded figures.") 
+    analyzer = ReActAnalyzer(runner, decider, coder, tracker, max_steps=5, verbose=args.verbose)
+    
+    # Use custom prompt if provided, otherwise use default
+    if custom_prompt:
+        user_requirements = custom_prompt
+    else:
+        user_requirements = "Comprehensive domain-specific report with embedded figures."
+    
+    report_md_path, report_text = analyzer.run(user_requirements) 
 
     if args.format:
         print(f"📦 Converting to {args.format}...")
