@@ -1,9 +1,145 @@
+#!/usr/bin/env python3
+"""
+IAthon – Iteration 6.6 (Token Tracking Version - Fixed)
+New: Comprehensive token usage logging and cost estimation.
+"""
 
+import argparse
+import os
+import shutil      
+import subprocess
+import re
+import time
+import warnings
+from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Dict
+
+warnings.filterwarnings("ignore")
+
+# --- Core scientific stack ---
+import pandas as pd
+import numpy as np
+from scipy import stats
+
+# --- Plotting (headless-safe) ---
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import seaborn as sns  
 import plotly.express as px
 import plotly.graph_objects as go
 
 from openai import OpenAI
+
+# ======================================================
+# Token Usage Tracker
+# ======================================================
+@dataclass
+class TokenUsage:
+    """Track token usage per model"""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    
+    def add(self, prompt: int, completion: int):
+        self.prompt_tokens += prompt
+        self.completion_tokens += completion
+        self.total_tokens += (prompt + completion)
+
+@dataclass
+class UsageTracker:
+    """Central tracker for all API usage"""
+    models: Dict[str, TokenUsage] = field(default_factory=dict)
+    
+    def record(self, model: str, usage):
+        """Record usage from OpenAI response - handles multiple API formats"""
+        if model not in self.models:
+            self.models[model] = TokenUsage()
+        
+        # Try different attribute names for different API endpoints
+        prompt = 0
+        completion = 0
+        
+        # Try to get tokens using various possible attribute names
+        for prompt_attr in ['prompt_tokens', 'input_tokens', 'total_input_tokens']:
+            if hasattr(usage, prompt_attr):
+                prompt = getattr(usage, prompt_attr)
+                break
+        
+        for completion_attr in ['completion_tokens', 'output_tokens', 'total_output_tokens']:
+            if hasattr(usage, completion_attr):
+                completion = getattr(usage, completion_attr)
+                break
+        
+        # Fallback: check if it's a dict-like object
+        if prompt == 0 and completion == 0:
+            try:
+                if hasattr(usage, '__dict__'):
+                    usage_dict = usage.__dict__
+                elif hasattr(usage, 'model_dump'):
+                    usage_dict = usage.model_dump()
+                else:
+                    usage_dict = dict(usage)
+                
+                prompt = usage_dict.get('prompt_tokens') or usage_dict.get('input_tokens') or 0
+                completion = usage_dict.get('completion_tokens') or usage_dict.get('output_tokens') or 0
+            except:
+                print(f"⚠️  Warning: Could not extract token usage from response")
+                print(f"   Usage object type: {type(usage)}")
+                print(f"   Available attributes: {dir(usage)}")
+        
+        self.models[model].add(prompt, completion)
+    
+    def print_summary(self):
+        """Print detailed usage summary with cost estimates"""
+        print("\n" + "="*70)
+        print("📊 TOKEN USAGE SUMMARY")
+        print("="*70)
+        
+        # Approximate pricing (as of early 2025, adjust as needed)
+        pricing = {
+            "gpt-5.1": {"input": 0.00125, "output": 0.01},  # per 1K tokens
+            "gpt-5.1-codex-max": {"input": 0.00125, "output": 0.01},
+        }
+        
+        total_cost = 0.0
+        
+        for model, usage in self.models.items():
+            print(f"\n🤖 Model: {model}")
+            print(f"   Prompt tokens:     {usage.prompt_tokens:,}")
+            print(f"   Completion tokens: {usage.completion_tokens:,}")
+            print(f"   Total tokens:      {usage.total_tokens:,}")
+            
+            # Cost estimation
+            if model in pricing:
+                input_cost = (usage.prompt_tokens / 1000) * pricing[model]["input"]
+                output_cost = (usage.completion_tokens / 1000) * pricing[model]["output"]
+                model_cost = input_cost + output_cost
+                total_cost += model_cost
+                print(f"   Estimated cost:    ${model_cost:.4f}")
+        
+        print(f"\n{'='*70}")
+        print(f"💰 TOTAL ESTIMATED COST: ${total_cost:.4f}")
+        print("="*70)
+        
+        return total_cost
+    
+    def save_log(self, output_dir: Path):
+        """Save detailed log to file"""
+        log_path = output_dir / "token_usage.log"
+        
+        with open(log_path, 'w') as f:
+            f.write("TOKEN USAGE LOG\n")
+            f.write("="*70 + "\n\n")
+            
+            for model, usage in self.models.items():
+                f.write(f"Model: {model}\n")
+                f.write(f"  Prompt tokens:     {usage.prompt_tokens:,}\n")
+                f.write(f"  Completion tokens: {usage.completion_tokens:,}\n")
+                f.write(f"  Total tokens:      {usage.total_tokens:,}\n\n")
+        
+        print(f"📝 Token usage log saved to: {log_path}")
 
 # ======================================================
 # Utilities
@@ -15,13 +151,12 @@ def robust_rmtree(path: Path):
     """Attempt to delete a directory, handling Windows/OneDrive locks."""
     if not path.exists():
         return
-    for _ in range(3): # Try 3 times
+    for _ in range(3):
         try:
             shutil.rmtree(path)
             return
         except PermissionError:
-            time.sleep(1) # Wait for sync/lock to release
-    # Fallback: Just clear files inside instead of deleting folder
+            time.sleep(1)
     for item in path.iterdir():
         try:
             if item.is_file(): item.unlink()
@@ -59,7 +194,7 @@ class SafeRunner:
         self.figures_dir = self.output_dir / "figures"
         
         if self.figures_dir.exists():
-            if self.verbose: print(f"ðŸ§¹ Cleaning old figures (Robust mode)...")
+            if self.verbose: print(f"🧹 Cleaning old figures (Robust mode)...")
             robust_rmtree(self.figures_dir)
         
         self.figures_dir.mkdir(parents=True, exist_ok=True)
@@ -89,12 +224,14 @@ class SafeRunner:
 # 3. DECISION MAKER (CHAT MODEL)
 # ======================================================
 class DecisionMaker:
-    def __init__(self, api_key, verbose=False):
+    def __init__(self, api_key, tracker: UsageTracker, verbose=False):
         self.client = OpenAI(api_key=api_key)
+        self.tracker = tracker
         self.verbose = verbose
+        self.model = "gpt-5.1"
     
     def synthesize_report(self, analysis_log, original_prompt, figures_dir, data_preview):
-        if self.verbose: print("âœï¸ Synthesizing domain-aware report...")
+        if self.verbose: print("✍️ Synthesizing domain-aware report...")
         
         figs = sorted(figures_dir.glob("*.png"))
         fig_list = "\n".join([f"- {f.name}" for f in figs])
@@ -120,10 +257,15 @@ class DecisionMaker:
         STYLE: High-impact scientific paper.
         """
         response = self.client.chat.completions.create(
-            model="gpt-5.1", 
+            model=self.model, 
             messages=[{"role": "user", "content": synthesis_prompt}],
             temperature=0.7 
         )
+        
+        # Track usage
+        if hasattr(response, 'usage'):
+            self.tracker.record(self.model, response.usage)
+        
         return response.choices[0].message.content
 
     def decide(self, observations: str, step_num: int, max_steps: int, 
@@ -145,19 +287,26 @@ class DecisionMaker:
                 DECISION (ONE ACTION):"""
         
         response = self.client.chat.completions.create(
-            model="gpt-5.1",
+            model=self.model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
         )
+        
+        # Track usage
+        if hasattr(response, 'usage'):
+            self.tracker.record(self.model, response.usage)
+        
         return response.choices[0].message.content.strip()
 
 # ======================================================
 # 4. CODE GENERATOR (CODEX)
 # ======================================================
 class CodexGenerator:
-    def __init__(self, api_key, verbose=False):
+    def __init__(self, api_key, tracker: UsageTracker, verbose=False):
         self.client = OpenAI(api_key=api_key)
+        self.tracker = tracker
         self.verbose = verbose
+        self.model = "gpt-5.1-codex-max"
 
     def generate(self, instruction, num_features, cat_features, data_preview) -> str:
         prompt = f"""
@@ -171,24 +320,30 @@ class CodexGenerator:
             - ALWAYS save to FIGURES_DIR.
             """
         response = self.client.responses.create(
-            model="gpt-5.1-codex-max",
+            model=self.model,
             input=prompt,
         )
+        
+        # Track usage - try to access usage attribute safely
+        if hasattr(response, 'usage') and response.usage is not None:
+            self.tracker.record(self.model, response.usage)
+        
         return response.output_text.strip()
 
 # ======================================================
 # 5. REACT ORCHESTRATOR
 # ======================================================
 class ReActAnalyzer:
-    def __init__(self, runner, decider, coder, max_steps=20, verbose=False):
+    def __init__(self, runner, decider, coder, tracker: UsageTracker, max_steps=20, verbose=False):
         self.runner = runner
         self.decider = decider
         self.coder = coder
+        self.tracker = tracker
         self.max_steps = max_steps
         self.verbose = verbose
         self.observations = []
         self.analysis_log = []
-        self.data_preview = self.runner.df.head(10).to_string() # Increased preview for better context
+        self.data_preview = self.runner.df.head(10).to_string()
 
     def observe(self):
         figs = sorted(self.runner.figures_dir.glob("*.png"))
@@ -196,11 +351,11 @@ class ReActAnalyzer:
         self.observations.append(obs)
 
     def run(self, user_requirements): 
-        print(f"\nðŸ” STARTING ANALYSIS (Iteration 6.5)\n{'='*70}")
+        print(f"\n🔬 STARTING ANALYSIS (Iteration 6.6 - Token Tracking)\n{'='*70}")
         self.observe()
         
         for step in range(self.max_steps):
-            print(f"\nðŸ“ STEP {step + 1}/{self.max_steps}")
+            print(f"\n🔄 STEP {step + 1}/{self.max_steps}")
             decision = self.decider.decide("\n".join(self.observations), step, self.max_steps, self.runner.num_features, self.runner.cat_features, self.data_preview)
             
             if "STOP" in decision.upper(): break
@@ -209,9 +364,9 @@ class ReActAnalyzer:
             
             try:
                 self.runner.run(code)
-                if self.verbose: print("âš¡ Success.")
+                if self.verbose: print("⚡ Success.")
             except Exception as e:
-                print(f"âŒ Error: {e}")
+                print(f"❌ Error: {e}")
             
             self.observe()
             self.analysis_log.append({"step": step + 1, "thought": decision, "result": self.observations[-1]})
@@ -219,7 +374,12 @@ class ReActAnalyzer:
         report_text = self.decider.synthesize_report(self.analysis_log, user_requirements, self.runner.figures_dir, self.data_preview)
         report_path = self.runner.output_dir / "report.md" 
         report_path.write_text(report_text, encoding='utf-8')
-        print(f"âœ¨ Analysis complete. Report saved to {report_path}")
+        print(f"✨ Analysis complete. Report saved to {report_path}")
+        
+        # Print and save token usage
+        self.tracker.print_summary()
+        self.tracker.save_log(self.runner.output_dir)
+        
         return report_path
 
 # ======================================================
@@ -239,16 +399,19 @@ def main():
     output_path = Path(args.output)
     output_dir = output_path.parent
 
+    # Initialize usage tracker
+    tracker = UsageTracker()
+
     df, num_features, cat_features = load_and_clean(input_path)
     runner = SafeRunner(df, num_features, cat_features, output_dir, verbose=args.verbose)
-    decider = DecisionMaker(api_key, verbose=args.verbose)
-    coder = CodexGenerator(api_key, verbose=args.verbose)
+    decider = DecisionMaker(api_key, tracker, verbose=args.verbose)
+    coder = CodexGenerator(api_key, tracker, verbose=args.verbose)
 
-    analyzer = ReActAnalyzer(runner, decider, coder, max_steps=5, verbose=args.verbose)
+    analyzer = ReActAnalyzer(runner, decider, coder, tracker, max_steps=5, verbose=args.verbose)
     report_md_path = analyzer.run("Comprehensive domain-specific report with embedded figures.") 
 
     if args.format:
-        print(f"ðŸ“¦ Converting to {args.format}...")
+        print(f"📦 Converting to {args.format}...")
         out_file = output_path.with_suffix(f".{args.format}")
         subprocess.run(["pandoc", report_md_path.name, "-o", out_file.name], cwd=output_dir)
 
