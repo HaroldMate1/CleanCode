@@ -32,6 +32,16 @@ import plotly.graph_objects as go
 
 from openai import OpenAI
 
+# Try to import python-pptx for template creation
+try:
+    from pptx import Presentation
+    from pptx.util import Inches, Pt
+    from pptx.enum.text import PP_ALIGN
+    from pptx.dml.color import RGBColor
+    PPTX_AVAILABLE = True
+except ImportError:
+    PPTX_AVAILABLE = False
+
 # ======================================================
 # Token Usage Tracker
 # ======================================================
@@ -99,8 +109,8 @@ class UsageTracker:
         
         # Approximate pricing (as of early 2025, adjust as needed)
         pricing = {
-            "gpt-5.1": {"input": 0.00125, "output": 0.01},  # per 1K tokens
-            "gpt-5.1-codex-max": {"input": 0.00125, "output": 0.01},
+            "gpt-5.1": {"input": 0.01, "output": 0.03},  # per 1K tokens
+            "gpt-5.1-codex-max": {"input": 0.01, "output": 0.03},
         }
         
         total_cost = 0.0
@@ -163,6 +173,72 @@ def robust_rmtree(path: Path):
             elif item.is_dir(): shutil.rmtree(item)
         except:
             pass
+
+def create_styled_reference(output_dir: Path, figures_dir: Path):
+    """Create a styled PowerPoint reference template"""
+    if not PPTX_AVAILABLE:
+        print("⚠️  python-pptx not available. Install with: pip install python-pptx")
+        print("   Using default PowerPoint styling instead.")
+        return
+    
+    print("🎨 Creating styled presentation template...")
+    prs = Presentation()
+    prs.slide_width = Inches(10)
+    prs.slide_height = Inches(7.5)
+    
+    # Define color scheme (professional blue theme)
+    DARK_BLUE = RGBColor(31, 78, 121)
+    LIGHT_BLUE = RGBColor(68, 114, 196)
+    ACCENT_BLUE = RGBColor(91, 155, 213)
+    WHITE = RGBColor(255, 255, 255)
+    GRAY = RGBColor(89, 89, 89)
+    
+    # Slide 1: Title Slide Layout
+    title_slide = prs.slides.add_slide(prs.slide_layouts[6])  # Blank
+    
+    # Background with gradient effect (simulated with shapes)
+    background = title_slide.shapes.add_shape(
+        1,  # Rectangle
+        0, 0, prs.slide_width, prs.slide_height
+    )
+    background.fill.solid()
+    background.fill.fore_color.rgb = DARK_BLUE
+    background.line.fill.background()
+    
+    # Accent bar
+    accent = title_slide.shapes.add_shape(
+        1,
+        0, Inches(6.5), prs.slide_width, Inches(1)
+    )
+    accent.fill.solid()
+    accent.fill.fore_color.rgb = ACCENT_BLUE
+    accent.line.fill.background()
+    
+    # Slide 2: Content Slide Layout
+    content_slide = prs.slides.add_slide(prs.slide_layouts[6])
+    
+    # Header bar
+    header = content_slide.shapes.add_shape(
+        1,
+        0, 0, prs.slide_width, Inches(1)
+    )
+    header.fill.solid()
+    header.fill.fore_color.rgb = DARK_BLUE
+    header.line.fill.background()
+    
+    # Content area background
+    content_bg = content_slide.shapes.add_shape(
+        1,
+        0, Inches(1), prs.slide_width, Inches(6.5)
+    )
+    content_bg.fill.solid()
+    content_bg.fill.fore_color.rgb = WHITE
+    content_bg.line.fill.background()
+    
+    # Save reference template
+    ref_path = output_dir / "reference_template.pptx"
+    prs.save(str(ref_path))
+    print(f"✅ Template created: {ref_path}")
 
 # ======================================================
 # 1. DATA LOADING & CLEANING
@@ -260,6 +336,108 @@ class DecisionMaker:
             model=self.model, 
             messages=[{"role": "user", "content": synthesis_prompt}],
             temperature=0.7 
+        )
+        
+        # Track usage
+        if hasattr(response, 'usage'):
+            self.tracker.record(self.model, response.usage)
+        
+        return response.choices[0].message.content
+    
+    def synthesize_presentation(self, analysis_log, figures_dir, data_preview):
+        """Generate presentation-optimized content with bullet points"""
+        if self.verbose: print("📊 Creating presentation slides...")
+        
+        figs = sorted(figures_dir.glob("*.png"))
+        fig_list = "\n".join([f"- {f.name}" for f in figs])
+
+        pptx_prompt = f"""
+        You are creating a professional PowerPoint presentation for executives.
+        
+        DATA PREVIEW:
+        {data_preview}
+
+        ANALYSIS HISTORY:
+        {analysis_log}
+
+        AVAILABLE FIGURES (CRITICAL - You MUST use these exact filenames):
+        {fig_list}
+
+        YOUR TASK - Create a slide deck in Markdown format:
+        
+        STRUCTURE (Use # for slide titles):
+        
+        # [Title Slide - Catchy title based on data context]
+        
+        [Subtitle with context]
+        
+        ---
+        
+        # Executive Summary
+        
+        - 3-4 key bullet points (high-level insights only)
+        - Each bullet should be ONE concise line
+        
+        ---
+        
+        # Data Overview
+        
+        - What this data represents
+        - Key metrics tracked
+        - Sample size and scope
+        
+        ---
+        
+        # Key Finding 1: [Descriptive Title]
+        
+        - 2-3 bullet points summarizing the insight
+        - Keep each bullet to ONE line
+        
+        ![](figures/EXACT_FIGURE_NAME_1.png)
+        
+        ---
+        
+        # Key Finding 2: [Descriptive Title]
+        
+        - 2-3 bullet points
+        
+        ![](figures/EXACT_FIGURE_NAME_2.png)
+        
+        ---
+        
+        [Continue for EACH figure in the list above - create one findings slide per figure]
+        
+        # Statistical Insights
+        
+        - 3-4 bullets highlighting statistical significance
+        - Correlations or patterns discovered
+        
+        ---
+        
+        # Conclusions & Recommendations
+        
+        - 3-4 actionable takeaways
+        - Each as a single, impactful bullet
+        
+        CRITICAL RULES FOR IMAGES:
+        - Use EXACTLY: ![](figures/filename.png) - NO alt text in brackets
+        - Use the EXACT filenames from the list above
+        - Place image AFTER the bullet points on each findings slide
+        - Create ONE slide per figure
+        - Use --- to separate slides
+        
+        OTHER RULES:
+        - Maximum 5 bullets per slide
+        - Each bullet must be ONE line (max 15 words)
+        - Use domain-appropriate terminology
+        - Be specific with numbers when relevant
+        - NO paragraphs, NO long explanations
+        """
+        
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": pptx_prompt}],
+            temperature=0.6
         )
         
         # Track usage
@@ -380,7 +558,7 @@ class ReActAnalyzer:
         self.tracker.print_summary()
         self.tracker.save_log(self.runner.output_dir)
         
-        return report_path
+        return report_path, report_text
 
 # ======================================================
 # 6. CLI
@@ -408,12 +586,48 @@ def main():
     coder = CodexGenerator(api_key, tracker, verbose=args.verbose)
 
     analyzer = ReActAnalyzer(runner, decider, coder, tracker, max_steps=5, verbose=args.verbose)
-    report_md_path = analyzer.run("Comprehensive domain-specific report with embedded figures.") 
+    report_md_path, report_text = analyzer.run("Comprehensive domain-specific report with embedded figures.") 
 
     if args.format:
         print(f"📦 Converting to {args.format}...")
         out_file = output_path.with_suffix(f".{args.format}")
-        subprocess.run(["pandoc", report_md_path.name, "-o", out_file.name], cwd=output_dir)
+        
+        if args.format == "pptx":
+            # Generate presentation-optimized content
+            pptx_content = decider.synthesize_presentation(
+                analyzer.analysis_log, 
+                runner.figures_dir, 
+                analyzer.data_preview
+            )
+            pptx_md_path = output_dir / "presentation.md"
+            pptx_md_path.write_text(pptx_content, encoding='utf-8')
+            print(f"📊 Presentation markdown saved to {pptx_md_path}")
+            
+            # Create reference document with styling
+            create_styled_reference(output_dir, runner.figures_dir)
+            reference_pptx = output_dir / "reference_template.pptx"
+            
+            # Convert to PPTX with styling and explicit resource path
+            subprocess.run(
+                [
+                    "pandoc", 
+                    str(pptx_md_path.name),
+                    "-o", str(out_file.name),
+                    "-t", "pptx",
+                    f"--reference-doc={reference_pptx.name}",
+                    f"--resource-path={runner.figures_dir.absolute()}"
+                ],
+                cwd=output_dir,
+                check=True
+            )
+            print(f"✅ Presentation saved to {out_file}")
+        else:
+            # For PDF and DOCX, use the full report
+            subprocess.run(
+                ["pandoc", report_md_path.name, "-o", out_file.name],
+                cwd=output_dir
+            )
+            print(f"✅ Document saved to {out_file}")
 
 if __name__ == "__main__":
     main()
