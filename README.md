@@ -58,6 +58,104 @@ At a high level, the program does this:
 
 ---
 
+```mermaid
+flowchart TD
+  %% Make the whole diagram about 50% larger
+  classDef bigText font-size:18px;
+
+  subgraph CLI["CLI and Setup"]
+    A1[Parse args]
+    A2[Resolve paths and output dir]
+    A3[Get API key]
+    A4[Init UsageTracker and pricing]
+  end
+  A1 --> A2 --> A3 --> A4
+
+  subgraph DATA["Data Prep and Validation"]
+    B1[load_and_clean data]
+    B2[Init DataQualityValidator]
+    B3[Run validate checks]
+    B4{Validation passed?}
+    B5[Ask user for auto fix]
+    B6[Run auto_fix]
+    B7[Use original df]
+    B8[Use fixed df]
+  end
+
+  A4 --> B1 --> B2 --> B3 --> B4
+  B4 -- "yes" --> B7
+  B4 -- "no" --> B5
+  B5 -- "y" --> B6 --> B8
+  B5 -- "n" --> B7
+
+  subgraph SAFE["SafeRunner"]
+    C1[Init SafeRunner]
+    C2[Prepare figures_dir]
+    C3[Run user code safely]
+  end
+
+  B7 --> C1
+  B8 --> C1
+  C1 --> C2
+
+  subgraph AGENTS["AI Agents"]
+    D1[DecisionMaker]
+    D2[decide next batch]
+    D3[synthesize report]
+    E1[CodexGenerator]
+    E2[generate Python code]
+  end
+
+  C1 --> D1
+  C1 --> E1
+  D1 --> D2
+  D1 --> D3
+  E1 --> E2
+
+  subgraph REACT["ReActAnalyzer"]
+    F1[Init ReActAnalyzer]
+    F2[Init state and preview]
+    F3[observe figures]
+    F4[run analysis loop]
+  end
+
+  C1 --> F1 --> F2
+  F1 --> F3
+  F3 --> F4
+
+  subgraph OUTPUT["Reporting and Conversion"]
+    G1[Main calls analyzer.run]
+    G2{Output format}
+    G3[Create pptx via pandoc]
+    G4[Create pdf or docx via pandoc]
+    G5[Keep markdown only]
+    G6[Print usage summary]
+    G7[Save usage log]
+  end
+
+  F4 --> G1
+  G1 --> G2
+  G2 -- "pptx" --> G3 --> G6
+  G2 -- "pdf/docx" --> G4 --> G6
+  G2 -- "none" --> G5 --> G6
+  G6 --> G7
+
+  subgraph TRACK["Token and Cost Tracking"]
+    H1[UsageTracker state]
+    H2[record text usage]
+    H3[record image usage]
+  end
+
+  A4 --> H1
+  D2 --> H2
+  D3 --> H2
+  E2 --> H2
+  H1 --> G6
+  H1 --> G7
+
+  %% Apply the larger font to everything
+  class CLI,DATA,SAFE,AGENTS,REACT,OUTPUT,TRACK,A1,A2,A3,A4,B1,B2,B3,B4,B5,B6,B7,B8,C1,C2,C3,D1,D2,D3,E1,E2,F1,F2,F3,F4,G1,G2,G3,G4,G5,G6,G7,H1,H2,H3 bigText;
+```
 
 
 
