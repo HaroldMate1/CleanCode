@@ -171,4 +171,38 @@ flowchart TD
   - **OUTPUT**: report creation and optional pandoc conversion.
   - **TRACK**: central token/cost tracker used by all model calls.
 
-If you’d like, I can also add a smaller, “cheat-sheet” diagram focused just on the three main agents (DecisionMaker, CodexGenerator, ReActAnalyzer) and their back-and-forth, suitable for a quick README overview.
+## Illustration on how the three main agents interact
+
+- **DecisionMaker**: decides *what* to do next (analysis step vs. code step vs. summarization).
+- **CodexGenerator**: writes and updates Python code to run against the data.
+- **ReActAnalyzer**: orchestrates the loop, feeding observations/results back into DecisionMaker and CodexGenerator until the analysis is done.
+
+Below is a minimal flowchart showing their back‑and‑forth:
+
+```mermaid
+flowchart TD
+  subgraph UserLoop["High-Level Agent Loop"]
+    DM[DecisionMaker<br/>- Plans next action<br/>- Chooses: analyze, code, or summarize]
+    CG[CodexGenerator<br/>- Writes/updates code<br/>- Calls SafeRunner]
+    RA[ReActAnalyzer<br/>- Orchestrates loop<br/>- Tracks context & state]
+  end
+
+  %% Core interaction loop
+  RA --> DM
+  DM -- "Need new/updated code" --> CG
+  CG -- "Code results, logs, figures" --> RA
+  DM -- "High-level analysis / conclusions" --> RA
+
+  %% Exit condition
+  DM -- "Ready to finalize report" --> RA:::done
+
+  classDef done fill:#c6f6d5,stroke:#2f855a,stroke-width:1px;
+```
+
+Key points in the diagram:
+
+- **ReActAnalyzer** sits in the middle, repeatedly:
+  - calling **DecisionMaker** to decide the next move,
+  - asking **CodexGenerator** for new/updated code when needed,
+  - aggregating outputs and deciding when the loop is complete.
+- **DecisionMaker** is the strategist; **CodexGenerator** is the coder; **ReActAnalyzer** is the conductor.
