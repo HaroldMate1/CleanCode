@@ -14,6 +14,7 @@ Give it a CSV/Excel file, and it will:
 This repository contains several files. The workhorse is AgentResearchAssitant.
 md_to_ppt.py is an attempt (that works) that converts Markdown to Powerpoint. It was written to decrease the complexity of the AgentResearchAssitant
 RetrieveImage.py is an utility function that illustrates how to download an image from the internet using a description. In teresting to illustrate the reports.
+
 ---
 
 ## Features
