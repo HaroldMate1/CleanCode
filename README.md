@@ -1,342 +1,220 @@
+# Tecnun-IAthon ResearchAssistant
 
-# Tecnun‑IAthon ResearchAssistant
+An AI-powered **data exploration and reporting tool** designed for the Tecnun-IAthon hackathon. Give it a CSV/Excel file, and it will automatically:
 
-An AI‑powered data exploration and reporting tool designed for the Tecnun‑IAthon.  
-Give it a CSV/Excel file, and it will:
+- ✅ Validate and clean the data
+- ✅ Iteratively explore it using AI "agents"
+- ✅ Generate multiple visualizations and statistical tests
+- ✅ Produce a comprehensive Markdown report (optionally converted to PDF, DOCX, or PPTX)
+- ✅ Track and summarize OpenAI token usage and cost
 
-- Validate and clean the data.
-- Iteratively explore it using AI “agents”.
-- Generate multiple visualizations.
-- Run statistical tests.
-- Produce a comprehensive Markdown report (optionally converted to PDF, DOCX, or PPTX).
-- Track and summarize OpenAI token usage and cost.
-
-This repository contains several files. The workhorse is AgentResearchAssitant.
-md_to_ppt.py is an attempt (that works) that converts Markdown to Powerpoint. It was written to decrease the complexity of the AgentResearchAssitant
-RetrieveImage.py is an utility function that illustrates how to download an image from the internet using a description. In teresting to illustrate the reports.
+This is a **ReAct-style agentic framework** that combines planning, code generation, and safe execution for intelligent data analysis.
 
 ---
 
-## Features
+## 📋 Table of Contents
 
-- **Command‑line tool**: simple CLI interface for running full analyses.
-- **Data loading & cleaning**:
-  - Reads CSV/Excel into a Pandas `DataFrame`.
-  - Drops low‑information columns and constant columns.
-  - Identifies numeric vs. categorical features.
-- **Data Quality Validation**:
-  - Checks for:
-    - Synthetic patterns (too‑perfect uniform distributions, etc.).
-    - Outliers.
-    - Domain constraints (ages, percentages, times).
-    - Temporal logic issues.
-  - Prints human‑readable summary (errors, warnings, info).
-  - Optionally auto‑fixes some issues (negative times, invalid ages, etc.).
-- **Safe execution sandbox (SafeRunner)**:
-  - Executes AI‑generated Python code safely with:
-    - Pre‑loaded `df`, `num_features`, `cat_features`.
-    - Access to `numpy`, `pandas`, `scipy.stats`, `matplotlib`, `seaborn`, `plotly`.
-    - A dedicated `figures/` directory.
-  - Blocks file‑reading functions (`pd.read_csv`, etc.).
-  - Rewrites `plt.savefig(...)` calls so all plots land in `figures/`.
-  - Ensures at least one `.png` is created or raises an error.
-- **AI “agents”**:
-  - **DecisionMaker**: plans the analysis steps and synthesizes the final report.
-  - **CodexGenerator**: generates robust Python code for analysis and plotting.
-  - **ReActAnalyzer**: orchestrates the iterative loop between agents and the SafeRunner.
-- **ReAct‑style analysis loop**:
-  - Repeatedly:
-    - Plans the next analysis step.
-    - Generates and runs code.
-    - Observes results and errors.
-  - Stops when the analysis is complete and builds a final Markdown report.
-- **Report generation & conversion**:
-  - Saves `report.md` in the output directory.
-  - Optionally converts to:
-    - PPTX (via `pandoc`, with optional custom templates if available).
-    - PDF or DOCX.
-- **OpenAI cost tracking**:
-  - Live pricing fetch (with caching and robust fallbacks).
-  - Tracks tokens per model.
-  - Prints a detailed cost summary at the end.
-  - Saves a `token_usage.log` file.
+- [Quick Start](#quick-start)
+- [Git Clone](#git-clone)
+- [Features](#features)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [Architecture](#architecture)
+- [Components](#components-code-overview)
+- [Troubleshooting](#troubleshooting)
+- [Hackathon Notes](#hackathon-notes-tecnun-iathon)
+- [License](#license)
 
 ---
 
-## High‑Level Architecture
+## 🚀 Quick Start
 
-### Big‑picture explanation
+Get started in 3 minutes:
 
-At a high level, the program does this:
+```bash
+# Clone the repository
+git clone https://github.com/arubio2/CleanCode.git
+cd CleanCode
 
-1. **CLI + Setup**
-   - Reads command-line arguments (input file, output path, format, custom prompt, API key).
-   - Creates an output directory.
-   - Initializes a **UsageTracker** that:
-     - Fetches OpenAI pricing (live web scrape → cache → fallback table).
-     - Tracks tokens/cost across models.
+# Create and activate virtual environment
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
-2. **Data Loading + Validation**
-   - `load_and_clean()` reads CSV/Excel into a DataFrame, drops bad columns, splits numeric vs categorical features.
-   - **DataQualityValidator**:
-     - Runs checks for synthetic patterns, outliers, domain constraints (ages, percentages, times), temporal logic.
-     - Prints a human-readable summary (errors/warnings/info).
-     - Optionally auto-fixes some issues (negative times, invalid ages).
+# Install dependencies
+pip install -r requirements.txt
 
-3. **Safe Execution Environment**
-   - **SafeRunner** holds the cleaned (or fixed) DataFrame.
-   - It executes generated Python code with:
-     - A safe global environment (df, plotting libraries, stats, np/pd, FIGURES_DIR).
-     - Blocked file-read calls (no `pd.read_csv`, etc.).
-     - Rewritten `plt.savefig(...)` calls so all plots land in an output `figures/` folder.
-     - A requirement that at least one `.png` is saved, or it raises an error.
+# Set your OpenAI API key
+export OPENAI_API_KEY="sk-..."  # Windows: set OPENAI_API_KEY=sk-...
 
-4. **AI “Agents”**
-   - **DecisionMaker** (planning & reporting agent):
-     - Uses OpenAI (chat/completions) to:
-       - Plan batch analyses over several steps (ReAct-style loop).
-       - Synthesize a final Markdown report that references the actual figures created.
-     - Logs token usage via **UsageTracker**.
-   - **CodexGenerator** (code-writing agent):
-     - Uses OpenAI (responses API) to generate Python code blocks that:
-       - Operate on the in-memory `df`.
-       - Create multiple plots per batch and save them to `FIGURES_DIR`.
-       - Obey robustness rules (check dtypes, handle NaNs, etc.).
-     - Logs token usage via **UsageTracker**.
-
-5. **ReActAnalyzer – Orchestrator**
-   - **ReActAnalyzer** coordinates the loop:
-     - Maintains observations, analysis log, error history, and a data preview.
-     - For up to `max_steps`:
-       - Asks **DecisionMaker** for the next “batch analysis” plan (or “STOP”).
-       - Asks **CodexGenerator** to turn that plan (plus any recent errors) into Python code.
-       - Runs that code with **SafeRunner**, then:
-         - Records success/failure, updates observations and logs.
-     - At the end, asks **DecisionMaker** to synthesize the final Markdown report.
-     - Saves `report.md` in the output directory.
-
-6. **Output Conversion + Cost Summary**
-   - If requested (`--format`), uses `pandoc` to convert `report.md` to PDF/DOCX or PPTX, with:
-     - Optional custom PPTX styling/template (if helper functions are available).
-   - Finally, **UsageTracker**:
-     - Prints a detailed cost summary by model.
-     - Saves `token_usage.log` in the output directory.
-
----
-
-### End‑to‑end pipeline (Mermaid)
-
-```mermaid
-flowchart TD
-  subgraph CLI["CLI and Setup"]
-    A1[Parse args]
-    A2[Resolve paths and output dir]
-    A3[Get API key]
-    A4[Init UsageTracker and pricing]
-  end
-  A1 --> A2 --> A3 --> A4
-
-  subgraph DATA["Data Prep and Validation"]
-    B1[load_and_clean data]
-    B2[Init DataQualityValidator]
-    B3[Run validate checks]
-    B4{Validation passed?}
-    B5[Ask user for auto fix]
-    B6[Run auto_fix]
-    B7[Use original df]
-    B8[Use fixed df]
-  end
-
-  A4 --> B1 --> B2 --> B3 --> B4
-  B4 -- "yes" --> B7
-  B4 -- "no" --> B5
-  B5 -- "y" --> B6 --> B8
-  B5 -- "n" --> B7
-
-  subgraph SAFE["SafeRunner"]
-    C1[Init SafeRunner]
-    C2[Prepare figures_dir]
-    C3[Run user code safely]
-  end
-
-  B7 --> C1
-  B8 --> C1
-  C1 --> C2
-
-  subgraph AGENTS["AI Agents"]
-    D1[DecisionMaker]
-    D2[decide next batch]
-    D3[synthesize report]
-    E1[CodexGenerator]
-    E2[generate Python code]
-  end
-
-  C1 --> D1
-  C1 --> E1
-  D1 --> D2
-  D1 --> D3
-  E1 --> E2
-
-  subgraph REACT["ReActAnalyzer"]
-    F1[Init ReActAnalyzer]
-    F2[Init state and preview]
-    F3[observe figures]
-    F4[run analysis loop]
-  end
-
-  C1 --> F1 --> F2
-  F1 --> F3
-  F3 --> F4
-
-  subgraph OUTPUT["Reporting and Conversion"]
-    G1[Main calls analyzer.run]
-    G2{Output format}
-    G3[Create pptx via pandoc]
-    G4[Create pdf or docx via pandoc]
-    G5[Keep markdown only]
-    G6[Print usage summary]
-    G7[Save usage log]
-  end
-
-  F4 --> G1
-  G1 --> G2
-  G2 -- "pptx" --> G3 --> G6
-  G2 -- "pdf/docx" --> G4 --> G6
-  G2 -- "none" --> G5 --> G6
-  G6 --> G7
-
-  subgraph TRACK["Token and Cost Tracking"]
-    H1[UsageTracker state]
-    H2[record text usage]
-    H3[record image usage]
-  end
-
-  A4 --> H1
-  D2 --> H2
-  D3 --> H2
-  E2 --> H2
-  H1 --> G6
-  H1 --> G7
+# Run analysis
+python AgentResearchAssitant.py --input data.csv --output-dir results/ --format pptx
 ```
 
-#### How to read this diagram
-
-- **Top → bottom**: high-level pipeline: CLI → data loading & validation → safe runner → AI agents → ReAct loop → outputs & cost summary.
-- **Subgraphs**:
-  - **CLI**: how the tool is configured by the user.
-  - **DATA**: how the DataFrame is cleaned and checked.
-  - **SAFE**: sandbox for executing model-generated code.
-  - **AGENTS**: Decider (plans + report) and Coder (code generation).
-  - **REACT**: orchestrator that iteratively uses the agents + SafeRunner.
-  - **OUTPUT**: report creation and optional pandoc conversion.
-  - **TRACK**: central token/cost tracker used by all model calls.
-
 ---
 
-## Agents cheat‑sheet (for README overview)
+## 📦 Git Clone
 
-This diagram focuses only on the three main agents and their back‑and‑forth.
-
-- **DecisionMaker**: decides *what* to do next (analysis step vs. code step vs. summarization).
-- **CodexGenerator**: writes and updates Python code to run against the data.
-- **ReActAnalyzer**: orchestrates the loop, feeding observations/results back into DecisionMaker and CodexGenerator until the analysis is done.
-
-```mermaid
-flowchart TD
-  subgraph UserLoop["High-Level Agent Loop"]
-    DM[DecisionMaker<br/>- Plans next action<br/>- Chooses: analyze, code, or summarize]
-    CG[CodexGenerator<br/>- Writes/updates code<br/>- Calls SafeRunner]
-    RA[ReActAnalyzer<br/>- Orchestrates loop<br/>- Tracks context & state]
-  end
-
-  RA --> DM
-  DM -- "Need new/updated code" --> CG
-  CG -- "Code results, logs, figures" --> RA
-  DM -- "High-level analysis / conclusions" --> RA
-
-  DM -- "Ready to finalize report" --> RA
-```
-
-Key ideas:
-
-- **ReActAnalyzer** is the conductor:
-  - Calls **DecisionMaker** to decide the next move.
-  - Calls **CodexGenerator** to get code for the planned step.
-  - Observes results/errors and updates context.
-- **DecisionMaker** is the strategist (planning & final report).
-- **CodexGenerator** is the coder (analysis & visualization code).
-
----
-
-## Installation
-
-1. **Clone the repository**
+### Clone the Repository
 
 ```bash
 git clone https://github.com/arubio2/CleanCode.git
 cd CleanCode
 ```
 
-2. **Create and activate a virtual environment (recommended)**
+### Clone with SSH (if configured)
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate      # On Windows: .venv\Scripts\activate
+git clone git@github.com:arubio2/CleanCode.git
+cd CleanCode
 ```
 
-3. **Install dependencies**
+---
 
-At minimum:
+## ✨ Features
+
+### Core Capabilities
+
+- **Command-line tool**: Simple CLI interface for running full analyses
+- **Data loading & cleaning**:
+  - Reads CSV/Excel into a Pandas DataFrame
+  - Drops low-information and constant columns
+  - Identifies numeric vs. categorical features
+
+- **Data Quality Validation**:
+  - Checks for synthetic patterns (too-perfect uniform distributions)
+  - Identifies outliers and domain constraint violations
+  - Detects temporal logic issues
+  - Prints human-readable validation report
+  - Optionally auto-fixes some issues (negative times, invalid ages, etc.)
+
+- **Safe execution sandbox** (SafeRunner):
+  - Executes AI-generated Python code safely
+  - Pre-loads `df`, `num_features`, `cat_features`
+  - Access to `numpy`, `pandas`, `scipy.stats`, `matplotlib`, `seaborn`, `plotly`
+  - Dedicated `figures/` directory for all outputs
+  - Blocks file-reading functions (`pd.read_csv`, etc.)
+  - Automatically redirects `plt.savefig()` calls to output directory
+  - Ensures at least one `.png` is created or raises error
+
+- **AI "Agents"**:
+  - **DecisionMaker**: Plans analysis steps and synthesizes final report
+  - **CodexGenerator**: Generates robust Python code for analysis and plotting
+  - **ReActAnalyzer**: Orchestrates iterative loop between agents and SafeRunner
+
+- **ReAct-style analysis loop**:
+  - Plans next analysis step
+  - Generates and runs code
+  - Observes results and errors
+  - Stops when analysis is complete
+
+- **Report generation & conversion**:
+  - Saves `report.md` in output directory
+  - Optionally converts to PPTX, PDF, or DOCX via `pandoc`
+  - Includes custom PowerPoint styling support
+
+- **OpenAI cost tracking**:
+  - Live pricing fetch (with caching and robust fallbacks)
+  - Tracks tokens per model
+  - Prints detailed cost summary at end
+  - Saves `token_usage.log` file
+
+---
+
+## 🛠️ Installation
+
+### Step 1: Clone the Repository
+
+```bash
+git clone https://github.com/arubio2/CleanCode.git
+cd CleanCode
+```
+
+### Step 2: Create and Activate Virtual Environment
+
+```bash
+# Using venv (recommended)
+python -m venv .venv
+source .venv/bin/activate      # On Windows: .venv\Scripts\activate
+
+# Or using conda
+conda create -n cleancode python=3.10
+conda activate cleancode
+```
+
+### Step 3: Install Dependencies
+
+#### Minimum Requirements
 
 ```bash
 pip install -r requirements.txt
 ```
 
-If you don’t have a `requirements.txt`, you’ll need (exact versions are up to you):
+If no `requirements.txt` exists, install these packages:
 
-- `pandas`
-- `numpy`
-- `scipy`
-- `matplotlib`
-- `seaborn`
-- `plotly`
-- `openai`
-- `requests` and `beautifulsoup4` (optional, for live pricing; falls back if missing)
-- `python-pptx` (optional, for PowerPoint enhancements)
+```bash
+pip install pandas numpy scipy matplotlib seaborn plotly openai requests beautifulsoup4 python-pptx
+```
+
+#### Optional Dependencies
+
+```bash
+# For live pricing functionality (optional)
+pip install requests beautifulsoup4
+
+# For PowerPoint enhancements (optional)
+pip install python-pptx
+
+# For PDF/DOCX conversion (optional but recommended)
+pip install pandoc
+```
+
+### Step 4: Install Pandoc (for document conversion)
 
 Pandoc is required for PDF/DOCX/PPTX conversion:
 
-- Install from: <https://pandoc.org/install.html>
+- **macOS**: `brew install pandoc`
+- **Windows**: Download from [https://pandoc.org/install.html](https://pandoc.org/install.html)
+- **Linux**: `sudo apt-get install pandoc`
+
+### Step 5: Verify Installation
+
+```bash
+python -c "import openai, pandas, numpy; print('✅ All packages installed!')"
+```
 
 ---
 
-## Configuration
+## ⚙️ Configuration
 
-### OpenAI API key
+### OpenAI API Key
 
 The script expects an OpenAI API key via:
 
-- Environment variable:
+#### Option 1: Environment Variable (Recommended)
 
-  ```bash
-  export OPENAI_API_KEY="sk-..."
-  ```
+```bash
+# Linux/macOS
+export OPENAI_API_KEY="sk-..."
 
-- Or a CLI argument (if implemented in your CLI wrapper):
+# Windows PowerShell
+$env:OPENAI_API_KEY="sk-..."
 
-  ```bash
-  python AgentResearchAssitant.py --api-key "sk-..." ...
-  ```
+# Windows CMD
+set OPENAI_API_KEY=sk-...
+```
 
-`get_api_key()` internally resolves the key from CLI or environment.
+#### Option 2: CLI Argument
+
+```bash
+python AgentResearchAssitant.py --api-key "sk-..." --input data.csv
+```
 
 ---
 
-## Usage
+## 📖 Usage
 
-The main entry point is `AgentResearchAssitant.py` (the ResearchAssistant script).
-
-A typical run:
+### Basic Usage
 
 ```bash
 python AgentResearchAssitant.py \
@@ -347,152 +225,315 @@ python AgentResearchAssitant.py \
   --verbose
 ```
 
-While exact flags may vary slightly, the flow is:
+### Command-Line Arguments
 
-1. **CLI + Setup**
-   - Parse arguments: input file, output directory, report format, custom prompt (if any), API key.
-   - Initialize `UsageTracker` (with live pricing fetch → cache → fallback).
+| Argument | Type | Description | Default |
+|----------|------|-------------|---------|
+| `--input` | str | Path to CSV/Excel input file | **Required** |
+| `--output-dir` | str | Output directory for results | `./results` |
+| `--format` | str | Output format: `pptx`, `pdf`, `docx`, or `md` | `md` |
+| `--max-steps` | int | Maximum analysis iterations | `6` |
+| `--prompt` | str | Custom analysis prompt | (auto-generated) |
+| `--api-key` | str | OpenAI API key | (from environment) |
+| `--verbose` | flag | Enable verbose logging | `False` |
 
-2. **Data loading & validation**
-   - Use `load_and_clean()` to load CSV/Excel into a `DataFrame`.
-   - Run `DataQualityValidator.validate()`:
-     - Print checks and issues.
-     - Optionally ask whether to auto‑fix certain problems.
-   - Proceed with original or fixed `df`.
+### Example Workflows
 
-3. **SafeRunner initialization**
-   - Create `SafeRunner(df, num_features, cat_features, output_dir, verbose=...)`.
-   - Prepare a fresh `figures/` subdirectory.
+#### Workflow 1: Quick Analysis (Markdown only)
+```bash
+python AgentResearchAssitant.py --input sales_data.csv --output-dir analysis/
+```
 
-4. **ReActAnalyzer loop**
-   - Initialize `ReActAnalyzer` with:
-     - The SafeRunner.
-     - The `UsageTracker`.
-     - Initial data preview and state.
-   - For each step (up to `max_steps`):
-     - Ask **DecisionMaker** for the next plan (or STOP).
-     - Ask **CodexGenerator** to generate Python code for that plan (taking into account recent errors).
-     - Run the code in `SafeRunner`.
-     - Observe generated figures and any errors; update the analysis log.
+#### Workflow 2: Full Report (PowerPoint)
+```bash
+python AgentResearchAssitant.py \
+  --input customer_data.csv \
+  --output-dir analysis/customers \
+  --format pptx \
+  --max-steps 8
+```
 
-5. **Final report & conversion**
-   - Ask **DecisionMaker** to synthesize a final Markdown report (references real figures in `figures/`).
-   - Save `report.md` in `output_dir`.
-   - If `--format` is:
-     - `pptx`: use `pandoc` (and optional helper functions) to generate a PowerPoint.
-     - `pdf` or `docx`: use `pandoc` to convert the markdown.
-     - Not given: keep markdown only.
+#### Workflow 3: PDF Report with Custom Prompt
+```bash
+python AgentResearchAssitant.py \
+  --input experiment_results.csv \
+  --output-dir analysis/experiments \
+  --format pdf \
+  --prompt "Focus on statistical significance and effect sizes" \
+  --max-steps 5
+```
 
-6. **Usage summary**
-   - Print a detailed token & cost summary via `UsageTracker.print_summary()`.
-   - Save `token_usage.log` in the output directory via `UsageTracker.save_log()`.
+### Output Structure
 
-Output structure (example):
-
-```text
+```
 results/run1/
-  report.md
-  report.pdf / report.docx / report.pptx  # if requested
-  figures/
-    fig_001.png
-    fig_002.png
-    ...
-  token_usage.log
+├── report.md                  # Markdown report
+├── report.pdf                 # Converted PDF (if --format pdf)
+├── report.docx                # Converted DOCX (if --format docx)
+├── report.pptx                # Converted PowerPoint (if --format pptx)
+├── figures/                   # Generated visualizations
+│   ├── fig_001.png
+│   ├── fig_002.png
+│   └── ...
+└── token_usage.log            # Cost & token summary
 ```
 
 ---
 
-## Components (Code Overview)
+## 🏗️ Architecture
 
-### `UsageTracker`
+### End-to-End Pipeline
 
-- Tracks token usage per model.
-- Attempts to fetch live pricing from `https://openai.com/api/pricing/`:
-  - If successful: caches data locally (`~/.cache/iathlon/openai_pricing.json`).
-  - If not: loads from cache.
-  - If both fail: uses a **fallback pricing table** (updated January 2025).
-- Supports both text models and image models (DALL‑E 2/3).
-- Computes and prints per‑model and total cost.
+```
+┌─────────────────────────────────────────────────────┐
+│           CLI + Setup                               │
+│  (args, output dir, UsageTracker, pricing)          │
+└──────────────────┬──────────────────────────────────┘
+                   │
+┌──────────────────▼──────────────────────────────────┐
+│      Data Loading & Validation                      │
+│  (load_and_clean, DataQualityValidator)             │
+└──────────────────┬──────────────────────────────────┘
+                   │
+┌──────────────────▼──────────────────────────────────┐
+│        Safe Execution Environment                   │
+│  (SafeRunner with sandboxed exec)                   │
+└──────────────────┬──────────────────────────────────┘
+                   │
+┌──────────────────▼──────────────────────────────────┐
+│     AI Agents (ReAct Loop)                          │
+│  DecisionMaker → CodexGenerator → SafeRunner        │
+└──────────────────┬──────────────────────────────────┘
+                   │
+┌──────────────────▼──────────────────────────────────┐
+│   Report Generation & Conversion                    │
+│  (Markdown → PDF/DOCX/PPTX via pandoc)             │
+└──────────────────┬──────────────────────────────────┘
+                   │
+┌──────────────────▼──────────────────────────────────┐
+│    Cost Summary & Logging                           │
+│  (UsageTracker.print_summary & save_log)            │
+└─────────────────────────────────────────────────────┘
+```
 
-### `SafeRunner`
+### Pipeline Flow
 
-- Holds:
-  - `df` (copy for each execution).
-  - `num_features`, `cat_features`.
-  - `figures_dir` (inside the chosen output directory).
-- Provides a `run(code: str)` method that:
-  - Strips triple backticks from code blocks if present.
-  - Blocks disallowed file reads (`pd.read_*`).
-  - Injects a safe global environment (df, plotting libs, stats, etc.).
-  - Rewrites `plt.savefig("plot.png")` → `plt.savefig(os.path.join(FIGURES_DIR, "plot.png"))`.
-  - Runs `exec` on the code and checks that at least one `.png` exists in `figures_dir`.
+**Step 1: CLI & Setup**
+- Parse command-line arguments
+- Create output directory structure
+- Initialize `UsageTracker` (fetches live OpenAI pricing)
 
-### `DataQualityValidator`
+**Step 2: Data Loading & Validation**
+- Load CSV/Excel into DataFrame via `load_and_clean()`
+- Run `DataQualityValidator.validate()`:
+  - Check synthetic patterns
+  - Identify outliers
+  - Verify domain constraints
+  - Print validation report
 
-- Takes:
-  - `df`, `num_features`, `cat_features`.
-- Methods:
-  - `validate()` runs:
-    - `_check_synthetic_patterns()`
-    - `_check_outliers()`
-    - `_check_domain_constraints()`
-    - `_check_temporal_logic()`
-  - Tracks issues and possible corrections.
-  - Can offer/perform automatic fixes for certain issues.
-- Prints a concise, readable validation report.
+**Step 3: SafeRunner Initialization**
+- Create `SafeRunner` instance with cleaned DataFrame
+- Prepare `figures/` subdirectory
+- Configure safe execution environment
+
+**Step 4: ReActAnalyzer Loop** (Orchestrator)
+- For each step (up to `max_steps`):
+  1. **Ask DecisionMaker**: What's the next analysis step?
+  2. **Ask CodexGenerator**: Generate Python code for that step
+  3. **Run with SafeRunner**: Execute code, capture figures & errors
+  4. **Update State**: Log results and observations
+
+**Step 5: Final Report & Conversion**
+- Ask DecisionMaker to synthesize final Markdown report
+- Save `report.md`
+- If `--format` specified, convert via pandoc:
+  - `pptx`: PowerPoint with optional custom styling
+  - `pdf` / `docx`: Direct conversion
+- Save `token_usage.log`
+
+---
+
+## 🧩 Components (Code Overview)
+
+### UsageTracker
+
+Tracks token usage and calculates costs:
+
+```python
+# Initialize
+tracker = UsageTracker()
+
+# Track a model call
+tracker.track_tokens(model="gpt-4o", input_tokens=100, output_tokens=50)
+
+# Get summary
+tracker.print_summary()
+tracker.save_log(filepath="token_usage.log")
+```
+
+**Features**:
+- Fetches live pricing from OpenAI
+- Caches pricing locally (`~/.cache/iathlon/openai_pricing.json`)
+- Falls back to hardcoded table if fetch fails
+- Supports text and image models
+
+### SafeRunner
+
+Executes AI-generated code safely:
+
+```python
+runner = SafeRunner(df, num_features, cat_features, figures_dir)
+result = runner.run(code_string)
+# Raises error if no .png files generated
+```
+
+**Security Features**:
+- Blocks file-reading functions (`pd.read_*`)
+- Injects safe global environment
+- Rewrites `plt.savefig()` → output to `figures/`
+- Requires at least one PNG output
+
+### DataQualityValidator
+
+Validates data quality automatically:
+
+```python
+validator = DataQualityValidator(df, num_features, cat_features)
+validator.validate()
+# Prints report and offers auto-fixes
+```
+
+**Checks**:
+- Synthetic patterns (uniform distributions)
+- Outliers (IQR method)
+- Domain constraints (ages, percentages, times)
+- Temporal logic (sequence integrity)
 
 ### AI Agents
 
-- **DecisionMaker**
-  - Uses OpenAI Chat / Completions API.
-  - Given:
-    - Data preview.
-    - Analysis log.
-    - Error history.
-    - Available figures.
-  - Produces:
-    - Next “batch analysis” instructions.
-    - Final Markdown report when asked to finish.
+#### DecisionMaker
+- Uses OpenAI Chat API
+- Plans next analysis steps
+- Synthesizes final report
+- Maintains global analysis context
 
-- **CodexGenerator**
-  - Uses OpenAI Responses API to produce Python code.
-  - Constraints:
-    - Operate on in-memory `df` only.
-    - Use `num_features` and `cat_features` sensibly.
-    - Save multiple plots to `FIGURES_DIR`.
-    - Handle NaNs, dtypes, and common pitfalls robustly.
+#### CodexGenerator
+- Uses OpenAI Responses API
+- Generates Python analysis code
+- Handles NaNs and data types
+- Creates multiple plots
 
-- **ReActAnalyzer**
-  - Maintains global loop state:
-    - Step counter.
-    - Observations and figures.
-    - Error history.
-    - Text log.
-  - At each iteration:
-    - Calls `DecisionMaker` → plan.
-    - Calls `CodexGenerator` → code.
-    - Calls `SafeRunner.run(code)` → figures and success/failure.
-  - At the end:
-    - Calls `DecisionMaker` to write the final Markdown report.
+#### ReActAnalyzer
+- Orchestrates entire loop
+- Maintains state and observations
+- Calls DecisionMaker → CodexGenerator → SafeRunner
+- Handles error recovery
 
 ---
 
-## Hackathon notes (Tecnun‑IAthon)
+## 🐛 Troubleshooting
 
-- This repository is meant as a **starting point**:
-  - You are encouraged to:
-    - Modify prompting strategies.
-    - Add new agents (e.g., a “HypothesisTester”, “DashboardBuilder”, etc.).
-    - Extend validation checks or auto‑fix logic.
-    - Customize the report structure and templates.
-    - Improve cost control and budgeting.
-- When experimenting:
-  - Be mindful of **token usage** and **model selection**.
-  - Use `gpt-4o-mini` / smaller models when possible.
-  - Check `token_usage.log` after each run.
+### Issue: `OPENAI_API_KEY not found`
+
+**Solution**:
+```bash
+# Set environment variable
+export OPENAI_API_KEY="sk-your-key"
+
+# Or pass via CLI
+python AgentResearchAssitant.py --api-key "sk-your-key" --input data.csv
+```
+
+### Issue: `FileNotFoundError: [Errno 2] No such file or directory: 'pandoc'`
+
+**Solution**: Install pandoc
+```bash
+# macOS
+brew install pandoc
+
+# Windows (download from https://pandoc.org/install.html)
+# Linux
+sudo apt-get install pandoc
+```
+
+### Issue: `ModuleNotFoundError: No module named 'openai'`
+
+**Solution**:
+```bash
+# Verify virtual environment is activated
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+
+# Reinstall dependencies
+pip install -r requirements.txt --force-reinstall
+```
+
+### Issue: `Rate limit exceeded` (OpenAI API)
+
+**Solution**:
+- Reduce `--max-steps`
+- Use a cheaper model (gpt-4o-mini instead of gpt-4)
+- Wait and retry after some time
+- Check usage at https://platform.openai.com/account/usage
+
+### Issue: `KeyError: 'figures_dir'` or figures not saving
+
+**Solution**:
+- Ensure `figures/` directory exists in output folder
+- Check write permissions on output directory
+- Verify plot code uses `plt.savefig()` (SafeRunner will rewrite it)
 
 ---
 
-## License
+## 📝 Hackathon Notes (Tecnun-IAthon)
 
-Add your chosen license here (e.g., MIT, Apache‑2.0).
+This repository is a **starting point for experimentation**:
+
+### ✅ You Are Encouraged to:
+- Modify prompting strategies for better analysis
+- Add new agents (e.g., HypothesisTester, DashboardBuilder)
+- Extend validation checks and auto-fix logic
+- Customize report structure and templates
+- Improve cost control and budgeting
+
+### 💡 Tips:
+- Use `gpt-4o-mini` or smaller models to control costs
+- Check `token_usage.log` after each run
+- Be mindful of token usage (especially with large datasets)
+- Test with small datasets first
+- Customize the system prompts for your use case
+
+### 🎯 Example Extensions:
+```python
+# Add a custom agent
+class DashboardBuilder(Agent):
+    def build_interactive_dashboard(self, df):
+        # Create Streamlit/Plotly interactive dashboard
+        pass
+
+# Integrate into ReActAnalyzer
+analyzer.add_agent("dashboard", DashboardBuilder())
+```
+
+---
+
+## 📚 Additional Files
+
+- **AgentResearchAssitant.py** - Main entry point (the ResearchAssistant)
+- **md_to_ppt.py** - Converts Markdown to PowerPoint (decreases complexity)
+- **RetrieveImage.py** - Utility to download images from internet by description
+
+---
+
+## 🔍 Quick Links
+
+- [GitHub Repository](https://github.com/arubio2/CleanCode)
+- [OpenAI API Documentation](https://platform.openai.com/docs)
+- [Pandoc Documentation](https://pandoc.org/)
+- [Issue Tracker](https://github.com/arubio2/CleanCode/issues)
+
+---
+
+**Last Updated**: January 2026  
+**Project**: Tecnun-IAthon ResearchAssistant  
+**Status**: Active Development  
+**Language**: Python 100%
